@@ -204,3 +204,53 @@ def recent_for_prompt(db: DB, n: int = 5) -> list[dict]:
                     "profit_factor": r["profit_factor"], "bench_pct": r["bench_pct"],
                     "lessons": rv.get("lessons", [])})
     return out
+
+
+def checks(db: DB, initial_cash: float) -> list[dict]:
+    """初心者向けの合否チェック。"""
+    c = cumulative(db)
+    if not c["days"]:
+        return []
+    out = [
+        {"name": "累計損益がプラス", "value": f"{c['total_pnl']:,.0f}円", "ok": c["total_pnl"] > 0},
+        {"name": "PF(総利益÷総損失)が1.2以上", "value": str(c["profit_factor"] if c["profit_factor"] is not None else "-"),
+         "ok": (c["profit_factor"] or 0) >= 1.2},
+        {"name": "最大ドローダウンが資金の5%以内", "value": f"{c['max_drawdown']:,.0f}円",
+         "ok": c["max_drawdown"] <= initial_cash * 0.05},
+        {"name": "取引が10回以上(判断できるだけの回数)", "value": f"{c['trades']}回", "ok": c["trades"] >= 10},
+    ]
+    if c["bench_avg_pct"] is not None:
+        out.append({"name": "TOPIXより平均日次リターンが高い",
+                    "value": f"{c['avg_daily_pct']:+.3f}% vs {c['bench_avg_pct']:+.3f}%",
+                    "ok": c["avg_daily_pct"] > c["bench_avg_pct"]})
+    return out
+
+
+def maybe_evaluate(engine) -> dict | None:
+    """検証日数(既定20営業日)に達したら、一度だけ総合評価を作って保存する。"""
+    db, cfg = engine.db, engine.cfg
+    c = cumulative(db)
+    if c["days"] < cfg.eval_days or db.get("evaluation"):
+        return None
+    payload = {
+        "cumulative": {k: v for k, v in c.items() if k != "curve"},
+        "checks": checks(db, cfg.initial_cash),
+        "daily": [{k: r[k] for k in COLS} for r in db.query("SELECT * FROM daily_stats ORDER BY date")],
+        "lessons": {r["date"]: r["lessons"] for r in recent_for_prompt(db, cfg.eval_days)},
+        "settings": {"initial_cash": cfg.initial_cash, "stop_loss_pct": cfg.stop_loss_pct,
+                     "take_profit_pct": cfg.take_profit_pct, "max_positions": cfg.max_positions},
+    }
+    try:
+        ev = engine.strategy.evaluate(payload) | {"by": engine.strategy.name}
+    except Exception as e:  # noqa: BLE001
+        log.warning("evaluation failed: %s", e)
+        from .strategy import RuleStrategy
+
+        ev = RuleStrategy().evaluate(payload) | {"by": "rule-fallback", "error": str(e)}
+    ev |= {"days": c["days"], "created_at": ts(), "checks": payload["checks"]}
+    db.set("evaluation", json.dumps(ev, ensure_ascii=False))
+    if cfg.report_dir:
+        os.makedirs(cfg.report_dir, exist_ok=True)
+        with open(os.path.join(cfg.report_dir, f"evaluation_{c['days']}days.json"), "w", encoding="utf-8") as f:
+            json.dump(ev | {"cumulative": payload["cumulative"]}, f, ensure_ascii=False, indent=1)
+    return ev

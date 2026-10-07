@@ -68,7 +68,7 @@ def test_risk_rules():
     rm = RiskManager(cfg())
     args = dict(cash=1_000_000, equity=1_000_000, orders_today=0, day_start_equity=1_000_000, halted=False)
     o, n = rm.review([d("A", "sell"), d("B", "buy", lots=10)], {}, {"A": 1000, "B": 1000}, **args)
-    assert n["A"].startswith("未保有") and [(x.symbol, x.qty) for x in o] == [("B", 300)]
+    assert n["A"].startswith("未保有") and [(x.symbol, x.qty) for x in o] == [("B", 500)]
     o, n = rm.review([d("B", "buy")], {}, {"B": 1000}, **args, can_enter=False)
     assert not o and "時間外" in n["B"]
     o, n = rm.review([d("B", "buy")], {}, {"B": 1000}, **args, blocked={"B": "クールダウン"})
@@ -217,3 +217,35 @@ def test_token_auth():
     cl = TestClient(create_app(e))
     assert cl.get("/api/summary").status_code == 401
     assert cl.get("/api/summary", headers={"Authorization": "Bearer secret"}).status_code == 200
+
+
+def test_evaluation_after_eval_days(tmp_path):
+    e = make_engine(Greedy(), "10:00", tmp_path)
+    e.cfg.eval_days = 3
+    for i, pnl in enumerate([5000, -2000, 8000]):
+        d = f"2026-01-0{i + 5}"
+        e.db.execute("INSERT INTO equity(ts,equity,cash) VALUES(?,?,?)", (d + " 10:00:00", 500_000, 500_000))
+        e.db.execute("INSERT INTO equity(ts,equity,cash) VALUES(?,?,?)", (d + " 15:20:00", 500_000 + pnl, 500_000))
+    analytics.backfill(e, "2026-01-08", include_today=False)
+    assert analytics.maybe_evaluate(e) is not None  # Greedy.evaluate 未実装 → ルールベース判定
+    ev = json.loads(e.db.get("evaluation"))
+    assert ev["days"] == 3 and ev["verdict"] and ev["by"] == "rule-fallback"
+    assert analytics.maybe_evaluate(e) is None  # 1回だけ
+    assert (tmp_path / "evaluation_3days.json").exists()
+    names = [c["name"] for c in analytics.checks(e.db, 500_000)]
+    assert "累計損益がプラス" in names
+
+
+def test_unaffordable_symbols_excluded():
+    """1単元が1銘柄の上限額を超える銘柄は判断対象にしない(資金50万円想定)。"""
+    seen = {}
+
+    class Spy(Greedy):
+        def decide(self, ctx):
+            seen.update(ctx["features"])
+            return "x", []
+
+    e = make_engine(Spy(), "10:00")
+    e.run_cycle()
+    lim = e.cfg.max_position_pct * e.cfg.initial_cash
+    assert all(f["one_lot_cost"] <= lim for f in seen.values())

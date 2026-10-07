@@ -46,6 +46,10 @@ canvas{width:100%;height:220px;display:block}
     <div class="kpis" id="cum"></div>
     <canvas id="cumchart" style="margin-top:12px"></canvas>
   </div>
+  <div class="card"><h2>検証の進み具合と合否チェック</h2>
+    <div id="evprog"></div><div style="height:8px;background:var(--bd);border-radius:4px;margin:8px 0"><div id="evbar" style="height:8px;background:var(--ok);border-radius:4px;width:0"></div></div>
+    <table id="checks"></table><div id="evresult" style="margin-top:12px"></div>
+  </div>
   <div class="card"><h2>最新の振り返り <span class="mut" id="revdate"></span></h2><div id="review" class="mut">まだ集計がありません</div></div>
   <div class="card"><h2>日次成績</h2><table id="daily"></table></div>
   <div class="card"><h2>保有ポジション</h2><table id="pos"></table></div>
@@ -79,6 +83,7 @@ const rate=n=>n==null?'-':(n*100).toFixed(0)+'%';
 async function refresh(){
   try{
   const [s,pos,dec,ord,eq,cum,daily]=await Promise.all([api('/api/summary'),api('/api/positions'),api('/api/decisions?limit=40'),api('/api/orders?limit=40'),api('/api/equity'),api('/api/cumulative'),api('/api/daily')]);
+  const ev=await api('/api/evaluation');
   $('#mode').textContent='PAPER 仮想売買';$('#mode').className='badge paper';
   $('#delay').textContent='データ遅延: '+(!s.market_open||s.data_delay_min==null?'-':'約'+s.data_delay_min+'分');
   $('#halt').hidden=!s.halted;$('#kill').textContent=s.halted?'▶ 新規買いを再開':'⏹ 新規買い停止(キルスイッチ)';
@@ -96,6 +101,12 @@ async function refresh(){
   $('#revat').textContent=s.schedule.review;
   $('#cum').innerHTML=cum.days?k('検証日数',cum.days+'日 (勝ち'+cum.win_days+')')+k('累計損益',yen(cum.total_pnl),cls(cum.total_pnl))+k('平均日次',pct(cum.avg_daily_pct,3),cls(cum.avg_daily_pct))+k('TOPIX平均日次',pct(cum.bench_avg_pct,3))+k('取引勝率',rate(cum.win_rate))+k('PF',cum.profit_factor??'-')+k('最大DD',yen(-cum.max_drawdown))+k('シャープ(年率)',cum.sharpe??'-'):'<div class="mut">大引け後に初回の集計が行われます</div>';
   draw($('#cumchart'),cum.curve?cum.curve.map(r=>r.cum_pnl):[],cum.curve&&cum.curve.length?[cum.curve[0].date,cum.curve.at(-1).date]:[]);
+  $('#evprog').textContent=`検証 ${ev.days} / ${ev.eval_days} 営業日`+(ev.days>=ev.eval_days?'(完了)':'');
+  $('#evbar').style.width=Math.min(100,ev.days/ev.eval_days*100)+'%';
+  table($('#checks'),[['チェック項目',r=>r.name],['現在の値',r=>r.value],['判定',r=>r.ok?'<span style="color:var(--ok)">○ 合格</span>':'<span class="err">× 未達</span>']],ev.checks);
+  if(ev.result){const r=ev.result,li=a=>a&&a.length?'<ul>'+a.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>':'<span class="mut">-</span>';
+    $('#evresult').innerHTML=`<h2>${ev.result.days}営業日の総合評価: <span style="color:var(--fg)">${esc(r.verdict)}</span></h2><p>${esc(r.summary)}</p><div class="two"><div><b>良かった点</b>${li(r.strengths)}</div><div><b>弱点</b>${li(r.weaknesses)}</div></div><b>改善案</b>${li(r.improvements)}`}
+  else $('#evresult').innerHTML=`<span class="mut">${ev.eval_days}営業日たまると、Claude が総合評価(実運用を検討してよいか)を書きます。途中の合否は上の表で毎日更新されます。</span>`;
   const lr=daily.find(r=>r.review);
   if(lr){const rv=lr.review,li=a=>a&&a.length?'<ul>'+a.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>':'<span class="mut">-</span>';
     $('#revdate').textContent=`(${lr.date} / ${rv.by||''})`;

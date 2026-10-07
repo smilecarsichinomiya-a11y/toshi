@@ -75,6 +75,28 @@ REVIEW_SCHEMA = {
 }
 
 
+EVAL_PROMPT = """あなたはデイトレード運用(仮想売買)の検証責任者です。所定の検証期間が終わりました。
+渡された「累計成績」「合否チェック」「日次成績の一覧」「各日の教訓」から、この戦略を評価してください。
+- verdict は次のどれか: "実運用を検討してよい" / "改善して検証を続ける" / "見直しが必要"。
+- 取引数が少ない場合や、相場環境(TOPIXの動き)に助けられただけの場合は、慎重に判断する。
+- 投資初心者にも分かる言葉で書く。専門用語には短い説明を添える。
+- improvements は、設定値や売買ルールの具体的な変更案にする(最大5個)。
+出力は指定の JSON スキーマに従うこと。"""
+
+EVAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["実運用を検討してよい", "改善して検証を続ける", "見直しが必要"]},
+        "summary": {"type": "string"},
+        "strengths": _STRS,
+        "weaknesses": _STRS,
+        "improvements": _STRS,
+    },
+    "required": ["verdict", "summary", "strengths", "weaknesses", "improvements"],
+    "additionalProperties": False,
+}
+
+
 class Strategy:
     name = "base"
 
@@ -82,6 +104,9 @@ class Strategy:
         raise NotImplementedError
 
     def review(self, payload: dict) -> dict:
+        raise NotImplementedError
+
+    def evaluate(self, payload: dict) -> dict:
         raise NotImplementedError
 
 
@@ -118,6 +143,9 @@ class ClaudeStrategy(Strategy):
         r["lessons"] = r.get("lessons", [])[:5]
         return r
 
+    def evaluate(self, payload: dict) -> dict:
+        return self._call(EVAL_PROMPT, EVAL_SCHEMA, payload, "検証期間の全データです。評価してください。", "high")
+
 
 class RuleStrategy(Strategy):
     """API キー未設定・API 障害時のフォールバック (VWAP・オープニングレンジのトレンドフォロー)。"""
@@ -145,6 +173,15 @@ class RuleStrategy(Strategy):
         t = payload["today"]
         return {"summary": f"(ルールベース集計) 損益{t['pnl']:,.0f}円 取引{t['trades']}回 勝率{(t['win_rate'] or 0) * 100:.0f}%",
                 "worked": [], "failed": [], "lessons": []}
+
+    def evaluate(self, payload: dict) -> dict:
+        checks = payload["checks"]
+        n = sum(c["ok"] for c in checks)
+        verdict = ("実運用を検討してよい" if n == len(checks) else
+                   "改善して検証を続ける" if n >= len(checks) - 2 else "見直しが必要")
+        return {"verdict": verdict, "summary": f"(ルールベース判定) 合格 {n}/{len(checks)} 項目",
+                "strengths": [c["name"] for c in checks if c["ok"]],
+                "weaknesses": [c["name"] for c in checks if not c["ok"]], "improvements": []}
 
 
 def _clean(decisions: list[dict], ctx: dict) -> list[dict]:

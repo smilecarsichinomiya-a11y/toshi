@@ -93,6 +93,12 @@ def create_app(engine: Engine) -> FastAPI:
     def cumulative():
         return analytics.cumulative(db)
 
+    @app.get("/api/evaluation", dependencies=[Depends(auth)])
+    def evaluation():
+        ev = db.get("evaluation")
+        return {"eval_days": cfg.eval_days, "days": analytics.cumulative(db)["days"],
+                "checks": analytics.checks(db, cfg.initial_cash), "result": json.loads(ev) if ev else None}
+
     @app.post("/api/daily/run", dependencies=[Depends(auth)])
     def daily_run(date: str | None = None):
         d = date or engine.clock().strftime("%Y-%m-%d")

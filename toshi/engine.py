@@ -102,6 +102,8 @@ class Engine:
         positions = self.managed_positions()
         symbols = sorted(set(cfg.universe) | set(positions))
         feats, prices, delays = {}, {}, []
+        # 1単元が1銘柄の上限額を超える銘柄は判断対象から外す(Claude に無駄な判断をさせない)
+        self._equity_hint = self.broker.cash() + sum(p.qty * p.avg_price for p in positions.values())
         for s in symbols:
             bars = self.data.intraday(s)
             f = intraday_features(bars, self.data.history(s))
@@ -111,7 +113,8 @@ class Engine:
                 f["data_delay_min"] = round(delay)
                 delays.append(delay)
                 prices[s] = f["price"]
-                if force or delay <= cfg.max_data_delay_min or s in positions:
+                affordable = f["price"] * cfg.lot_size <= cfg.max_position_pct * self._equity_hint
+                if s in positions or (affordable and (force or delay <= cfg.max_data_delay_min)):
                     feats[s] = f
             elif s in positions:
                 px = self.data.last_price(s)
@@ -262,6 +265,7 @@ class Engine:
             with self._run_lock:
                 self._snapshot()
                 analytics.run_daily(self, today)
+                analytics.maybe_evaluate(self)
 
     def _snapshot(self) -> None:
         pos = self.managed_positions()
@@ -274,6 +278,7 @@ class Engine:
         t = self.clock()
         try:
             analytics.backfill(self, t.strftime("%Y-%m-%d"), include_today=_hm(t) >= self.cfg.review_at)
+            analytics.maybe_evaluate(self)
         except Exception:  # noqa: BLE001
             log.exception("backfill failed")
         step = self.cfg.interval_min * 60

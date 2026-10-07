@@ -26,6 +26,11 @@ def _s(name: str, default: str) -> str:
     return os.environ.get(name) or default
 
 
+# 売買が活発な大型株。資金で1単元(100株)が買えない銘柄は自動で対象外になる
+DEFAULT_UNIVERSE = ("8306,8411,8316,8604,8601,9432,9434,4755,4689,7201,7267,6752,5020,9501,6178,"
+                    "7203,8058,5401,7011,6501,6758")
+
+
 @dataclass
 class Config:
     data_source: str = "yfinance"
@@ -33,11 +38,11 @@ class Config:
     benchmark: str = "1306"  # TOPIX連動ETF。日次成績の比較対象
     model: str = "claude-sonnet-5-5"
     anthropic_key: str = ""
-    initial_cash: float = 3_000_000
+    initial_cash: float = 500_000
     lot_size: int = 100
     # --- リスク (デイトレ向け既定値) ---
-    max_positions: int = 3
-    max_position_pct: float = 0.33
+    max_positions: int = 2
+    max_position_pct: float = 0.50
     cash_reserve_pct: float = 0.05
     stop_loss_pct: float = 0.015
     trailing_stop_pct: float = 0.015
@@ -52,6 +57,7 @@ class Config:
     entry_end: str = "14:30"
     flatten_at: str = "15:15"  # これ以降は全ポジションを強制決済 (持ち越さない)
     review_at: str = "15:40"  # 日次成績の集計・振り返り
+    eval_days: int = 20  # この営業日数たまったら総合評価を出す
     interval_min: int = 15
     auto_start: bool = True
     # --- ダッシュボード ---
@@ -64,17 +70,17 @@ class Config:
 
 def load_config() -> Config:
     _load_dotenv()
-    uni = _s("TOSHI_UNIVERSE", "7203,6758,9984,8306,8316,8411,9432,7011,7012,5401,6501,8035")
+    uni = _s("TOSHI_UNIVERSE", DEFAULT_UNIVERSE)
     cfg = Config(
         data_source=_s("TOSHI_DATA", "yfinance"),
         universe=[u.strip() for u in uni.split(",") if u.strip()],
         benchmark=_s("TOSHI_BENCHMARK", "1306"),
         model=_s("TOSHI_MODEL", "claude-sonnet-5-5"),
         anthropic_key=_s("ANTHROPIC_API_KEY", ""),
-        initial_cash=_f("TOSHI_INITIAL_CASH", 3_000_000),
+        initial_cash=_f("TOSHI_INITIAL_CASH", 500_000),
         lot_size=_i("TOSHI_LOT_SIZE", 100),
-        max_positions=_i("TOSHI_MAX_POSITIONS", 3),
-        max_position_pct=_f("TOSHI_MAX_POSITION_PCT", 0.33),
+        max_positions=_i("TOSHI_MAX_POSITIONS", 2),
+        max_position_pct=_f("TOSHI_MAX_POSITION_PCT", 0.50),
         cash_reserve_pct=_f("TOSHI_CASH_RESERVE_PCT", 0.05),
         stop_loss_pct=_f("TOSHI_STOP_LOSS_PCT", 0.015),
         trailing_stop_pct=_f("TOSHI_TRAILING_STOP_PCT", 0.015),
@@ -88,6 +94,7 @@ def load_config() -> Config:
         entry_end=_s("TOSHI_ENTRY_END", "14:30"),
         flatten_at=_s("TOSHI_FLATTEN_AT", "15:15"),
         review_at=_s("TOSHI_REVIEW_AT", "15:40"),
+        eval_days=_i("TOSHI_EVAL_DAYS", 20),
         interval_min=_i("TOSHI_INTERVAL_MIN", 15),
         auto_start=_s("TOSHI_AUTO_START", "yes").lower() == "yes",
         host=_s("TOSHI_HOST", "127.0.0.1"),
