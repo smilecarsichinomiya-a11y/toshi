@@ -31,9 +31,9 @@ canvas{width:100%;height:220px;display:block}
 </head>
 <body>
 <header>
-  <h1>📈 toshi 日本株デイトレ管理 <span class="mut" style="font-size:12px;font-weight:400">楽天証券</span></h1>
+  <h1>📈 toshi 日本株デイトレ管理 <span class="mut" style="font-size:12px;font-weight:400">仮想売買(実際のお金は動きません)</span></h1>
   <span id="mode" class="badge"></span><span id="halt" class="badge halt" hidden>新規買い停止中</span>
-  <span id="mkt" class="badge"></span>
+  <span id="mkt" class="badge"></span><span id="delay" class="badge" title="無料データ(Yahoo)の遅れ"></span>
   <button id="run">今すぐ判断を実行</button>
   <button id="kill" class="danger"></button>
   <button id="tok" title="TOSHI_DASH_TOKEN を設定した場合">🔑</button>
@@ -79,7 +79,8 @@ const rate=n=>n==null?'-':(n*100).toFixed(0)+'%';
 async function refresh(){
   try{
   const [s,pos,dec,ord,eq,cum,daily]=await Promise.all([api('/api/summary'),api('/api/positions'),api('/api/decisions?limit=40'),api('/api/orders?limit=40'),api('/api/equity'),api('/api/cumulative'),api('/api/daily')]);
-  $('#mode').textContent=s.mode==='live'?'LIVE 実売買':'PAPER 仮想売買';$('#mode').className='badge '+s.mode;
+  $('#mode').textContent='PAPER 仮想売買';$('#mode').className='badge paper';
+  $('#delay').textContent='データ遅延: '+(!s.market_open||s.data_delay_min==null?'-':'約'+s.data_delay_min+'分');
   $('#halt').hidden=!s.halted;$('#kill').textContent=s.halted?'▶ 新規買いを再開':'⏹ 新規買い停止(キルスイッチ)';
   $('#mkt').textContent=s.market_open?'市場: 立会中':'市場: 時間外';
   const k=(l,v,c='')=>`<div class="card k"><div class="l">${l}</div><div class="v ${c}">${v}</div></div>`;

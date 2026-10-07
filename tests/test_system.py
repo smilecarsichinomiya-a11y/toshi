@@ -4,7 +4,7 @@ from datetime import datetime
 from fastapi.testclient import TestClient
 
 from toshi import analytics
-from toshi.broker import PaperBroker, Position, RakutenRssBroker
+from toshi.broker import PaperBroker, Position
 from toshi.config import Config
 from toshi.data import SyntheticProvider
 from toshi.db import DB, JST
@@ -81,7 +81,7 @@ def test_risk_rules():
 
 def test_exit_signals():
     pos = {s: Position(s, 100, 1000) for s in "ABC"}
-    out = exit_signals(cfg(), pos, {"A": 989, "B": 1021, "C": 1009}, {"C": 1020})
+    out = exit_signals(cfg(), pos, {"A": 980, "B": 1031, "C": 1014}, {"C": 1030})
     assert {o.symbol: o.source for o in out} == {"A": "risk-stop", "B": "risk-takeprofit", "C": "risk-trailing"}
 
 
@@ -156,33 +156,46 @@ def test_backfill_missed_days():
     assert e.db.query("SELECT pnl FROM daily_stats")[0]["pnl"] == 10_000
 
 
-def test_rakuten_bridge(tmp_path):
-    import threading
-    import time
+def test_stale_data_blocks_entry():
+    """無料データが遅れすぎている銘柄には新規エントリーしない。"""
 
-    b = RakutenRssBroker(str(tmp_path), fill_timeout=5)
-    (tmp_path / "state.txt").write_text(
-        f"updated={datetime.now():%Y-%m-%d %H:%M:%S}\ncash=500000\npos=7203,200,2500.5\n", encoding="utf-8")
-    assert b.cash() == 500000 and b.positions()["7203"].qty == 200
+    class Stale(SyntheticProvider):
+        def intraday(self, symbol):
+            df = super().intraday(symbol)
+            return df[df.index <= df.index[-1].replace(hour=9, minute=35)]
 
-    def fake_excel():
-        for _ in range(50):
-            fs = list((tmp_path / "orders").glob("*.txt"))
-            if fs:
-                kv = dict(l.split("=", 1) for l in fs[0].read_text().splitlines())
-                (tmp_path / "fills" / f"{kv['id']}.txt").write_text("status=filled\nprice=2510\nmessage=ok\n")
-                return
-            time.sleep(0.1)
+    c = cfg()
+    db = DB(":memory:")
+    e = Engine(c, db, PaperBroker(db, c.initial_cash), Stale(), Greedy(), clock=at("10:30"))
+    r = e.run_cycle()
+    assert not r["executed"] and e.data_delay_min == 50
+    e.clock = at("10:15")  # 遅れ35分なら許容
+    assert e.run_cycle()["executed"]
 
-    threading.Thread(target=fake_excel).start()
-    f = b.order("7203", "buy", 100, 2500)
-    assert f.ok and f.price == 2510
-    (tmp_path / "state.txt").write_text("updated=2020-01-01 00:00:00\ncash=1\n")
-    try:
-        b.cash()
-        raise AssertionError("stale state must raise")
-    except RuntimeError:
-        pass
+
+def test_claude_strategy_uses_structured_output():
+    """Sonnet/Opus 5.5 は forced tool_choice が 400 になるため、構造化出力で呼ぶこと。"""
+    from types import SimpleNamespace
+
+    from toshi.strategy import ClaudeStrategy
+
+    calls = []
+
+    class FakeMessages:
+        def create(self, **kw):
+            calls.append(kw)
+            body = json.dumps({"market_view": "強い", "decisions": [
+                {"symbol": "7203", "action": "buy", "lots": 1, "confidence": 1.7, "reason": "r"},
+                {"symbol": "XXXX", "action": "buy", "lots": 1, "confidence": 0.9, "reason": "unknown"}]})
+            return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=body)])
+
+    st = ClaudeStrategy("k", "claude-sonnet-5-5")
+    st.client = SimpleNamespace(messages=FakeMessages())
+    view, ds = st.decide({"features": {"7203": {}}, "positions": {}})
+    assert view == "強い" and [d["symbol"] for d in ds] == ["7203"] and ds[0]["confidence"] == 1.0
+    kw = calls[0]
+    assert "tool_choice" not in kw and "tools" not in kw
+    assert kw["output_config"]["format"]["type"] == "json_schema" and kw["output_config"]["effort"] == "medium"
 
 
 def test_api(tmp_path):

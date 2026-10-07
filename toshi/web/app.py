@@ -42,11 +42,12 @@ def create_app(engine: Engine) -> FastAPI:
         realized = db.query("SELECT COALESCE(SUM(pnl),0) p FROM orders WHERE status='filled'")[0]["p"]
         last = db.query("SELECT * FROM runs ORDER BY id DESC LIMIT 1")
         return {
-            "mode": "live" if cfg.live else "paper", "broker": broker.name, "strategy": engine.strategy.name,
+            "mode": "paper", "broker": broker.name, "strategy": engine.strategy.name,
             "model": cfg.model, "halted": engine.halted, "market_open": market_open(),
             "equity": equity, "cash": cash, "day_pnl": equity - start, "total_pnl": equity - base,
             "realized_pnl": realized, "last_run": engine.last_run, "last_error": engine.last_error,
             "market_view": last[0]["summary"] if last else "", "universe": cfg.universe,
+            "data_delay_min": engine.data_delay_min,
             "schedule": {"entry": f"{cfg.entry_start}-{cfg.entry_end}", "flatten": cfg.flatten_at,
                          "review": cfg.review_at, "interval_min": cfg.interval_min},
             "limits": {"stop_loss": cfg.stop_loss_pct, "trailing": cfg.trailing_stop_pct,
@@ -100,8 +101,8 @@ def create_app(engine: Engine) -> FastAPI:
 
     @app.post("/api/run", dependencies=[Depends(auth)])
     def run_now():
-        # 手動実行は市場時間外でも判断・記録まで行う(paper向け)。live では市場時間外は実行しない。
-        threading.Thread(target=engine.run_cycle, kwargs={"force": not cfg.live}, daemon=True).start()
+        # 手動実行は市場時間外でも判断・記録まで行う(仮想売買なので実害はない)
+        threading.Thread(target=engine.run_cycle, kwargs={"force": True}, daemon=True).start()
         return {"started": True}
 
     @app.post("/api/halt", dependencies=[Depends(auth)])

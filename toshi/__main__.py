@@ -25,7 +25,7 @@ def main() -> None:
     cfg = engine.cfg
     if cfg.host not in ("127.0.0.1", "localhost") and not cfg.dash_token:
         raise SystemExit("外部公開(TOSHI_HOST)する場合は TOSHI_DASH_TOKEN を必ず設定してください")
-    print(f"[toshi] mode={'LIVE' if cfg.live else 'paper'} strategy={engine.strategy.name} universe={len(cfg.universe)}銘柄")
+    print(f"[toshi] 仮想売買 strategy={engine.strategy.name} universe={len(cfg.universe)}銘柄")
     if cfg.auto_start:
         engine.start()
     uvicorn.run(create_app(engine), host=cfg.host, port=cfg.port, log_level="warning")

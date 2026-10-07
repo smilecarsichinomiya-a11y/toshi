@@ -42,6 +42,7 @@ class Engine:
         self._stop = threading.Event()
         self.last_run: str = ""
         self.last_error: str = ""
+        self.data_delay_min: float | None = None
 
     def _ts(self) -> str:
         return self.clock().strftime("%Y-%m-%d %H:%M:%S")
@@ -100,17 +101,25 @@ class Engine:
 
         positions = self.managed_positions()
         symbols = sorted(set(cfg.universe) | set(positions))
-        feats, prices = {}, {}
+        feats, prices, delays = {}, {}, []
         for s in symbols:
-            f = intraday_features(self.data.intraday(s), self.data.history(s))
+            bars = self.data.intraday(s)
+            f = intraday_features(bars, self.data.history(s))
             if f:
-                feats[s], prices[s] = f, f["price"]
+                # 5分足の確定時刻(=足の開始+5分)から現在までの遅れ
+                delay = max(0.0, (t - bars.index[-1].to_pydatetime()).total_seconds() / 60 - 5)
+                f["data_delay_min"] = round(delay)
+                delays.append(delay)
+                prices[s] = f["price"]
+                if force or delay <= cfg.max_data_delay_min or s in positions:
+                    feats[s] = f
             elif s in positions:
                 px = self.data.last_price(s)
                 if px:
                     prices[s] = px
         if not prices:
             raise RuntimeError("株価データを取得できませんでした")
+        self.data_delay_min = round(sorted(delays)[len(delays) // 2]) if delays else None
 
         equity, cash = self.equity(prices)
         if db.get(f"day_start_{today}") is None:

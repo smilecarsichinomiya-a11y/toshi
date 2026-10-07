@@ -64,6 +64,7 @@ def intraday_features(bars: pd.DataFrame | None, daily: pd.DataFrame | None) -> 
         "volume_ratio": round(recent_vol / base_vol, 2) if base_vol > 0 else None,
         "ret_last_30m_pct": _pct(last, float(today["Close"].iloc[-7])) if len(today) > 6 else None,
         "bars_today": len(today),
+        "last_bar": today.index[-1].strftime("%H:%M"),
     }
     if daily is not None and len(daily) >= 25:
         dc = daily["Close"]
