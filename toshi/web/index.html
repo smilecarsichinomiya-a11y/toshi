@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>toshi 日本株トレード管理</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1c2330;--mut:#6b7686;--bd:#e3e7ee;--up:#d6336c;--dn:#1c7ed6;--ok:#2f9e44;--warn:#e8590c}
+@media (prefers-color-scheme:dark){:root{--bg:#10141b;--card:#181e28;--fg:#e6eaf0;--mut:#8b96a8;--bd:#283042;--up:#ff6b9a;--dn:#5aa9ff;--ok:#51cf66;--warn:#ff922b}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--bd);background:var(--card)}
+h1{font-size:18px;margin:0;margin-right:auto}
+.badge{padding:2px 10px;border-radius:99px;font-size:12px;font-weight:600;border:1px solid var(--bd)}
+.paper{color:var(--ok)}.live{color:#fff;background:var(--up);border-color:var(--up)}.halt{color:#fff;background:var(--warn);border-color:var(--warn)}
+main{padding:16px;max-width:1200px;margin:auto;display:grid;gap:16px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;overflow:auto}
+.k .l{color:var(--mut);font-size:12px}.k .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.up{color:var(--up)}.dn{color:var(--dn)}
+h2{font-size:14px;margin:0 0 8px;color:var(--mut)}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--bd);white-space:nowrap}
+th:first-child,td:first-child,td.t,th.t{text-align:left}td.t{white-space:normal;min-width:220px}
+th{color:var(--mut);font-weight:500;font-size:12px}
+button{font:inherit;padding:6px 14px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--fg);cursor:pointer}
+button.danger{background:var(--warn);color:#fff;border-color:var(--warn)}
+canvas{width:100%;height:220px;display:block}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px}
+.mut{color:var(--mut)}.err{color:var(--warn)}
+</style>
+</head>
+<body>
+<header>
+  <h1>📈 toshi 日本株トレード管理</h1>
+  <span id="mode" class="badge"></span><span id="halt" class="badge halt" hidden>新規買い停止中</span>
+  <span id="mkt" class="badge"></span>
+  <button id="run">今すぐ判断を実行</button>
+  <button id="kill" class="danger"></button>
+  <button id="tok" title="TOSHI_DASH_TOKEN を設定した場合">🔑</button>
+</header>
+<main>
+  <div class="kpis" id="kpis"></div>
+  <div class="card"><h2>Claude の相場観 <span class="mut" id="meta"></span></h2><div id="view">-</div><div class="err" id="err"></div></div>
+  <div class="card"><h2>資産推移</h2><canvas id="chart"></canvas></div>
+  <div class="card"><h2>保有ポジション</h2><table id="pos"></table></div>
+  <div class="two">
+    <div class="card"><h2>Claude の判断ログ</h2><table id="dec"></table></div>
+    <div class="card"><h2>注文履歴</h2><table id="ord"></table></div>
+  </div>
+  <div class="card mut" id="limits"></div>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+let token=localStorage.getItem('toshi_token')||'';
+const yen=n=>(n<0?'-':'')+'¥'+Math.abs(Math.round(n)).toLocaleString();
+const cls=n=>n>0?'up':n<0?'dn':'';
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function api(p,opt={}){const r=await fetch(p,{...opt,headers:{Authorization:'Bearer '+token}});
+  if(r.status==401){const t=prompt('ダッシュボードトークン');if(t){token=t;localStorage.setItem('toshi_token',t);return api(p,opt)}throw 0}
+  return r.json()}
+function table(el,cols,rows){el.innerHTML='<tr>'+cols.map(c=>`<th class="${c[2]||''}">${c[0]}</th>`).join('')+'</tr>'+
+  (rows.length?rows.map(r=>'<tr>'+cols.map(c=>`<td class="${c[2]||''}">${c[1](r)}</td>`).join('')+'</tr>').join(''):`<tr><td colspan="${cols.length}" class="mut">データなし</td></tr>`)}
+function draw(rows){const c=$('#chart'),dpr=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;c.width=w*dpr;c.height=h*dpr;
+  const g=c.getContext('2d');g.scale(dpr,dpr);g.clearRect(0,0,w,h);if(rows.length<2){g.fillStyle='#888';g.fillText('データ蓄積中…',10,20);return}
+  const v=rows.map(r=>r.equity),mn=Math.min(...v),mx=Math.max(...v),pad=(mx-mn)*.1||1,L=60,B=18;
+  const x=i=>L+i*(w-L-8)/(v.length-1),y=a=>(h-B-6)-(a-(mn-pad))/(mx-mn+2*pad)*(h-B-12);
+  const cs=getComputedStyle(document.body);g.strokeStyle=cs.getPropertyValue('--bd');g.fillStyle=cs.getPropertyValue('--mut');g.font='11px sans-serif';
+  for(let k=0;k<=3;k++){const a=mn-pad+(mx-mn+2*pad)*k/3;g.beginPath();g.moveTo(L,y(a));g.lineTo(w-8,y(a));g.stroke();g.fillText(yen(a),2,y(a)+4)}
+  g.strokeStyle=cs.getPropertyValue(v.at(-1)>=v[0]?'--up':'--dn');g.lineWidth=2;g.beginPath();v.forEach((a,i)=>i?g.lineTo(x(i),y(a)):g.moveTo(x(i),y(a)));g.stroke();
+  g.fillStyle=cs.getPropertyValue('--mut');g.fillText(rows[0].ts.slice(5,16),L,h-3);g.textAlign='right';g.fillText(rows.at(-1).ts.slice(5,16),w-8,h-3);g.textAlign='left'}
+async function refresh(){
+  try{
+  const [s,pos,dec,ord,eq]=await Promise.all([api('/api/summary'),api('/api/positions'),api('/api/decisions?limit=40'),api('/api/orders?limit=40'),api('/api/equity')]);
+  $('#mode').textContent=s.mode==='live'?'LIVE 実売買':'PAPER 仮想売買';$('#mode').className='badge '+s.mode;
+  $('#halt').hidden=!s.halted;$('#kill').textContent=s.halted?'▶ 新規買いを再開':'⏹ 新規買い停止(キルスイッチ)';
+  $('#mkt').textContent=s.market_open?'市場: 立会中':'市場: 時間外';
+  const k=(l,v,c='')=>`<div class="card k"><div class="l">${l}</div><div class="v ${c}">${v}</div></div>`;
+  $('#kpis').innerHTML=k('総資産',yen(s.equity))+k('現金',yen(s.cash))+k('本日損益',yen(s.day_pnl),cls(s.day_pnl))+k('累計損益',yen(s.total_pnl),cls(s.total_pnl))+k('実現損益',yen(s.realized_pnl),cls(s.realized_pnl));
+  $('#view').textContent=s.market_view||'まだ判断が実行されていません';$('#err').textContent=s.last_error?'⚠ '+s.last_error:'';
+  $('#meta').textContent=`(${s.strategy} / ${s.model} / 最終実行 ${s.last_run||'-'})`;
+  $('#limits').textContent=`リスク設定: 損切り ${s.limits.stop_loss*100}% / トレーリング ${s.limits.trailing*100}% / 利確 ${s.limits.take_profit*100}% / 日次損失上限 ${s.limits.daily_loss*100}% / 最大${s.limits.max_positions}銘柄 / 1銘柄上限 ${s.limits.max_position_pct*100}% ・ 監視: ${s.universe.join(', ')}`;
+  table($('#pos'),[['銘柄',r=>r.symbol],['株数',r=>r.qty.toLocaleString()],['取得単価',r=>r.avg_price.toFixed(1)],['現在値',r=>r.price.toFixed(1)],['評価額',r=>yen(r.value)],['損益',r=>`<span class="${cls(r.pnl)}">${yen(r.pnl)} (${r.pnl_pct.toFixed(2)}%)</span>`]],pos);
+  table($('#dec'),[['時刻',r=>r.ts.slice(5,16)],['銘柄',r=>r.symbol],['判断',r=>({buy:'買い',sell:'売り',hold:'様子見'})[r.action]],['確信',r=>r.confidence.toFixed(2)],['理由 / 結果',r=>esc(r.reason)+(r.outcome&&r.outcome!=='実行'?` <span class="err">[${esc(r.outcome)}]</span>`:''),'t']],dec);
+  table($('#ord'),[['時刻',r=>r.ts.slice(5,16)],['銘柄',r=>r.symbol],['売買',r=>r.side==='buy'?'買':'売'],['株数',r=>r.qty],['価格',r=>r.price.toFixed(1)],['損益',r=>r.pnl==null?'':`<span class="${cls(r.pnl)}">${yen(r.pnl)}</span>`],['区分/理由',r=>`<span class="mut">${r.source}</span> ${esc(r.reason)}${r.status!=='filled'?' <span class="err">[失敗]</span>':''}`,'t']],ord);
+  draw(eq);
+  }catch(e){}}
+$('#run').onclick=async()=>{$('#run').disabled=true;await api('/api/run',{method:'POST'});setTimeout(()=>{$('#run').disabled=false;refresh()},8000)};
+$('#kill').onclick=async()=>{const on=!$('#halt').hidden?false:true;if(on&&!confirm('新規買いを停止します(損切り等の売りは継続)'))return;await api('/api/halt?on='+on,{method:'POST'});refresh()};
+$('#tok').onclick=()=>{const t=prompt('ダッシュボードトークン',token);if(t!==null){token=t;localStorage.setItem('toshi_token',t);refresh()}};
+refresh();setInterval(refresh,15000);
+</script>
+</body>
+</html>

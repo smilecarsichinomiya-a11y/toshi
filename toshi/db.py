@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+import threading
+from datetime import datetime, timedelta, timezone
+
+JST = timezone(timedelta(hours=9))
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS positions (symbol TEXT PRIMARY KEY, qty INTEGER, avg_price REAL);
+CREATE TABLE IF NOT EXISTS position_meta (symbol TEXT PRIMARY KEY, high_water REAL, opened_at TEXT);
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, symbol TEXT, side TEXT, qty INTEGER,
+  price REAL, status TEXT, source TEXT, reason TEXT, broker_ref TEXT, pnl REAL);
+CREATE TABLE IF NOT EXISTS decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, symbol TEXT, action TEXT, lots INTEGER,
+  confidence REAL, reason TEXT, outcome TEXT);
+CREATE TABLE IF NOT EXISTS equity (ts TEXT PRIMARY KEY, equity REAL, cash REAL);
+CREATE TABLE IF NOT EXISTS runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, summary TEXT, strategy TEXT, error TEXT);
+"""
+
+
+def now() -> datetime:
+    return datetime.now(JST)
+
+
+def ts() -> str:
+    return now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+class DB:
+    def __init__(self, path: str):
+        if path != ":memory:":
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.lock = threading.RLock()
+        with self.lock:
+            self.conn.executescript(SCHEMA)
+
+    def execute(self, sql: str, args: tuple = ()) -> int:
+        with self.lock:
+            cur = self.conn.execute(sql, args)
+            self.conn.commit()
+            return cur.lastrowid
+
+    def query(self, sql: str, args: tuple = ()) -> list[dict]:
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        r = self.query("SELECT v FROM kv WHERE k=?", (key,))
+        return r[0]["v"] if r else default
+
+    def set(self, key: str, value: str) -> None:
+        self.execute("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (key, value))
