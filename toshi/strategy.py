@@ -25,6 +25,8 @@ SYSTEM_PROMPT = """あなたは日本株(東証・現物・ロングオンリー
   小さな上下で売買を繰り返さない。保有していない銘柄は売れない(空売り禁止)。
 - 迷うときは hold。確度(confidence, 0〜1)は正直に。0.55未満の買いは実行されない。
 - lots は売買単位(1単元=lot_size株)の数。one_lot_cost が資金余力に収まらない銘柄は買わない。
+- today_focus は今朝のニュース調査で選んだ注目銘柄(材料と狙い方つき)。features はこの銘柄が中心。
+  材料の方向と、5分足の動き(VWAP・出来高)が一致したときだけ買う。材料があっても動きが伴わなければ見送る。
 - recent_performance の教訓(lessons)を踏まえ、同じ失敗を繰り返さない。
 - reason は日本語で簡潔に(根拠の数値を含める)。
 - decisions には features にある全銘柄を1件ずつ含める。
@@ -117,6 +119,42 @@ class Strategy:
     def evaluate(self, payload: dict) -> dict:
         raise NotImplementedError
 
+    def premarket(self, ctx: dict) -> dict:
+        raise NotImplementedError  # 未対応の戦略は標準銘柄(universe)で売買する
+
+
+PREMARKET_RESEARCH = """あなたは日本株デイトレードの朝の準備担当です。本日(date)の東証の寄り付き前です。
+Web検索で次を調べ、調査メモ(日本語、箇条書き)にまとめてください。
+- 前日の米国市場(ダウ・ナスダック・半導体)、為替(ドル円)、日経先物、原油・金利など、今日の地合いを左右する材料
+- 今日の日本株で注目される材料: 決算発表、業績修正、上方修正、大型提携、政策・規制、格上げ、急騰急落の背景など
+- 材料が出ていて出来高が増えそうな銘柄を、銘柄名と4桁の証券コードつきで。1株が max_price_per_share 円以下の銘柄を優先する
+事実と推測を区別し、出典(媒体名・URL)を残すこと。確認できなかったことは「不明」と書く。"""
+
+PREMARKET_PICK = """調査メモをもとに、本日デイトレードで注目する銘柄を最大 max_picks 個選んでください。
+- 選ぶ基準: 材料があり出来高が伸びそうで、日中に+2〜3%の値幅が見込める流動性の高い銘柄。ロング(買い)で狙う前提。
+- 材料のない大型株でも、standard_universe の中に地合い的に狙える銘柄があれば含めてよい。
+- 1株が max_price_per_share 円を超える銘柄、流動性の低い銘柄、急騰後で過熱した銘柄は避ける。
+- 地合いが悪く見送りが妥当なら、少数(0〜3銘柄)に絞ってよい。無理に数を揃えない。
+- 銘柄コードは調査メモにあるものだけ。思い出しや推測で書かない。
+- reason には根拠となるニュースと、どう狙うか(例: 寄り後の押し目買い)を書く。
+出力は指定の JSON スキーマに従うこと。"""
+
+PREMARKET_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "outlook": {"type": "string", "description": "今日の地合いの見立て(2〜4文)"},
+        "picks": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string", "description": "4桁の証券コード"}, "name": {"type": "string"},
+                           "news": {"type": "string", "description": "材料(1文)"},
+                           "reason": {"type": "string", "description": "狙い方"}},
+            "required": ["symbol", "name", "news", "reason"], "additionalProperties": False}},
+        "sources": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["outlook", "picks", "sources"],
+    "additionalProperties": False,
+}
+
 
 class ClaudeStrategy(Strategy):
     name = "claude"
@@ -150,6 +188,25 @@ class ClaudeStrategy(Strategy):
         r = self._call(REVIEW_PROMPT, REVIEW_SCHEMA, payload, "本日のデータです。振り返ってください。", "high")
         r["lessons"] = r.get("lessons", [])[:5]
         return r
+
+    def premarket(self, ctx: dict) -> dict:
+        """1) Web検索で調査 2) 調査メモから銘柄を構造化出力で選ぶ。"""
+        first = {"role": "user", "content": PREMARKET_RESEARCH + "\n```json\n"
+                 + json.dumps({k: ctx[k] for k in ("date", "max_price_per_share")}, ensure_ascii=False) + "\n```"}
+        msgs = [first]
+        tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 10,
+                  "user_location": {"type": "approximate", "country": "JP", "timezone": "Asia/Tokyo"}}]
+        notes = ""
+        for _ in range(4):  # 長い検索は pause_turn で中断されるので続きを依頼する
+            msg = self.client.messages.create(model=self.model, max_tokens=16000, tools=tools, messages=msgs)
+            notes += "".join(b.text for b in msg.content if b.type == "text")
+            if msg.stop_reason != "pause_turn":
+                break
+            msgs = [first, {"role": "assistant", "content": msg.content}]
+        if not notes.strip():
+            raise RuntimeError("ニュースの調査結果が空でした")
+        return self._call(PREMARKET_PICK, PREMARKET_SCHEMA, ctx | {"research_notes": notes},
+                          "調査メモと条件です。本日の注目銘柄を選んでください。", "high")
 
     def evaluate(self, payload: dict) -> dict:
         return self._call(EVAL_PROMPT, EVAL_SCHEMA, payload, "検証期間の全データです。評価してください。", "high")

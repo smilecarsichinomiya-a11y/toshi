@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 
 import json
 
-from .. import analytics
+from .. import analytics, premarket
 from ..engine import Engine, market_open
 
 HERE = os.path.dirname(__file__)
@@ -98,6 +98,16 @@ def create_app(engine: Engine) -> FastAPI:
         ev = db.get("evaluation")
         return {"eval_days": cfg.eval_days, "days": analytics.cumulative(db)["days"],
                 "checks": analytics.checks(db, cfg.initial_cash), "result": json.loads(ev) if ev else None}
+
+    @app.get("/api/premarket", dependencies=[Depends(auth)])
+    def premarket_latest():
+        return premarket.latest(db)
+
+    @app.post("/api/premarket/run", dependencies=[Depends(auth)])
+    def premarket_run():
+        d = engine.clock().strftime("%Y-%m-%d")
+        threading.Thread(target=lambda: premarket.run(engine, d), daemon=True).start()
+        return {"started": True}
 
     @app.get("/api/improvements", dependencies=[Depends(auth)])
     def improvements():

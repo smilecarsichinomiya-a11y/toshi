@@ -56,6 +56,9 @@ class Config:
     entry_start: str = "09:30"
     entry_end: str = "14:30"
     flatten_at: str = "15:15"  # これ以降は全ポジションを強制決済 (持ち越さない)
+    premarket_at: str = "08:30"  # 寄り付き前のニュース確認・注目銘柄の選定
+    watch_max: int = 8  # 1日に注目する銘柄数の上限
+    min_avg_volume: int = 200_000  # 直近20日平均の出来高(株)がこれ未満の銘柄は選ばない
     review_at: str = "15:40"  # 日次成績の集計・振り返り
     eval_days: int = 20  # この営業日数たまったら総合評価を出す
     interval_min: int = 15
@@ -93,6 +96,9 @@ def load_config() -> Config:
         entry_start=_s("TOSHI_ENTRY_START", "09:30"),
         entry_end=_s("TOSHI_ENTRY_END", "14:30"),
         flatten_at=_s("TOSHI_FLATTEN_AT", "15:15"),
+        premarket_at=_s("TOSHI_PREMARKET_AT", "08:30"),
+        watch_max=_i("TOSHI_WATCH_MAX", 8),
+        min_avg_volume=_i("TOSHI_MIN_AVG_VOLUME", 200_000),
         review_at=_s("TOSHI_REVIEW_AT", "15:40"),
         eval_days=_i("TOSHI_EVAL_DAYS", 20),
         interval_min=_i("TOSHI_INTERVAL_MIN", 15),

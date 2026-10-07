@@ -123,12 +123,20 @@ def run_daily(engine, date: str, with_review: bool = True) -> dict | None:
     return stats
 
 
+def _premarket_brief(db: DB, date: str) -> dict | None:
+    from . import premarket
+
+    pm = premarket.get(db, date)
+    return {"outlook": pm["outlook"], "picks": pm["picks"]} if pm else None
+
+
 def make_review(engine, stats: dict) -> dict:
     db = engine.db
     payload = {
         "today": {k: stats[k] for k in COLS} | {"detail": stats["detail"]},
         "decisions": db.query("SELECT ts,symbol,action,lots,confidence,reason,outcome FROM decisions "
                               "WHERE ts LIKE ? AND action!='hold' ORDER BY id LIMIT 200", (stats["date"] + "%",)),
+        "premarket": _premarket_brief(db, stats["date"]),
         "tunable": {k: {"current": getattr(engine.cfg, k), "min": v[0], "max": v[1]} for k, v in TUNABLE.items()},
         "applied_changes": applied_for_prompt(db),
         "pending_proposals": db.query("SELECT param,new_value FROM improvements WHERE status='pending'"),

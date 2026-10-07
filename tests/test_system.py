@@ -275,3 +275,37 @@ def test_improvement_loop(tmp_path):
     assert other.stop_loss_pct == 0.008
     assert analytics.improvements(e.db)[0]["before"]["days"] == 1
     assert analytics.decide_improvement(e, imps[0]["id"], False) is None  # 二重決定は不可
+
+
+def test_premarket_picks_drive_watchlist(tmp_path):
+    """朝の選定銘柄だけが売買対象になる。不正・買えない銘柄は除外、失敗した日は標準銘柄に戻る。"""
+    from toshi import premarket
+
+    class Pick(Greedy):
+        def premarket(self, ctx):
+            assert ctx["max_price_per_share"] > 0
+            return {"outlook": "地合い良好", "sources": ["x"], "picks": [
+                {"symbol": "6758", "name": "A", "news": "n", "reason": "r"},
+                {"symbol": "BAD!", "name": "B", "news": "n", "reason": "r"},
+                {"symbol": "6758", "name": "dup", "news": "n", "reason": "r"}]}
+
+    seen = {}
+
+    class Spy(Pick):
+        def decide(self, ctx):
+            seen.update(ctx)
+            return "t", []
+
+    e = make_engine(Spy(), "10:00", tmp_path, min_avg_volume=0, max_position_pct=1.0)
+    out = premarket.run(e, "2026-01-05")
+    assert [p["symbol"] for p in out["picks"]] == ["6758"] and len(out["dropped"]) == 2
+    assert premarket.watchlist(e, "2026-01-05") == ["6758"]
+    assert premarket.watchlist(e, "2026-01-06") == e.cfg.universe  # 選定が無い日は標準銘柄
+    e.run_cycle(force=True)
+    today = e.clock().strftime("%Y-%m-%d")
+    e.db.set(f"premarket_{today}", json.dumps(out))
+    e.run_cycle(force=True)
+    assert set(seen["features"]) <= {"6758"} and seen["today_focus"]["outlook"] == "地合い良好"
+    assert premarket.latest(e.db)["picks"][0]["symbol"] == "6758"
+    # 未対応の戦略(NotImplementedError)は何もしない
+    assert premarket.run(make_engine(Greedy(), "10:00"), "2026-01-05") is None

@@ -5,7 +5,7 @@ import threading
 import time
 from datetime import datetime
 
-from . import analytics
+from . import analytics, premarket
 from .broker import Broker, Position
 from .data import DataProvider
 from .db import DB, now
@@ -101,7 +101,8 @@ class Engine:
         can_enter = force or self.entry_allowed(t)
 
         positions = self.managed_positions()
-        symbols = sorted(set(cfg.universe) | set(positions))
+        pm = premarket.get(db, today)
+        symbols = sorted(set(premarket.watchlist(self, today)) | set(positions))
         feats, prices, delays = {}, {}, []
         # 1単元が1銘柄の上限額を超える銘柄は判断対象から外す(Claude に無駄な判断をさせない)
         self._equity_hint = self.broker.cash() + sum(p.qty * p.avg_price for p in positions.values())
@@ -179,6 +180,7 @@ class Engine:
                               "opened_at": opened.get(s)}
                           for s, p in positions.items()},
             "recent_performance": analytics.recent_for_prompt(db),
+            "today_focus": {"outlook": pm["outlook"], "picks": pm["picks"]} if pm else None,
             "features": {s: {**f, "one_lot_cost": round(f["price"] * cfg.lot_size)} for s, f in feats.items()},
         }
         strat = self.strategy
@@ -268,6 +270,17 @@ class Engine:
                 analytics.run_daily(self, today)
                 analytics.maybe_evaluate(self)
 
+    def maybe_premarket(self) -> None:
+        """寄り付き前(既定8:30)に、その日の注目銘柄を1回選ぶ。起動が遅れた日も、前場の間は追いつく。"""
+        t = self.clock()
+        today = t.strftime("%Y-%m-%d")
+        if (t.weekday() >= 5 or not (self.cfg.premarket_at <= _hm(t) < "11:30")
+                or self.db.get(f"premarket_done_{today}") is not None):
+            return
+        self.db.set(f"premarket_done_{today}", "1")  # 失敗しても再試行しない(API費用と時間の暴走防止)
+        with self._run_lock:
+            premarket.run(self, today)
+
     def _snapshot(self) -> None:
         pos = self.managed_positions()
         prices = {s: self.data.last_price(s) or p.avg_price for s, p in pos.items()}
@@ -284,6 +297,10 @@ class Engine:
             log.exception("backfill failed")
         step = self.cfg.interval_min * 60
         while not self._stop.is_set():
+            try:
+                self.maybe_premarket()
+            except Exception:  # noqa: BLE001
+                log.exception("premarket job failed")
             self.run_cycle()  # キルスイッチ中も損切り・強制決済は継続(新規買いのみ RiskManager が拒否)
             try:
                 self.maybe_daily()
