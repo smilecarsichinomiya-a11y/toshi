@@ -59,6 +59,10 @@ REVIEW_PROMPT = """あなたはデイトレード運用(仮想売買)の振り�
 - lessons は翌日以降の売買判断にそのまま渡される。短く具体的で、実行できる行動指針にする(最大5個)。
   例:「出来高比1.5未満のレンジ上抜けは本日2戦0勝。出来高が伴うまで待つ」
 - ベンチマーク(TOPIX連動ETF)との比較も踏まえる。取引しなかった日は、見送りが妥当だったかを評価する。
+- proposals は設定値の変更案。毎日出す必要はなく、直近の複数日・複数取引に共通する根拠があるときだけ(0〜2個)。
+  1日の結果に合わせた変更は過剰適合になる。tunable に挙げた項目と範囲内でのみ提案する。
+  applied_changes に過去に適用した変更と、その前後の成績がある。効果が出ていない変更は元に戻す案も検討する。
+  同時に複数の項目を変えると効果が分からなくなるので、未判定(pending)の案がある項目は再提案しない。
 出力は指定の JSON スキーマに従うこと。"""
 
 _STRS = {"type": "array", "items": {"type": "string"}}
@@ -69,8 +73,12 @@ REVIEW_SCHEMA = {
         "worked": _STRS,
         "failed": _STRS,
         "lessons": _STRS,
+        "proposals": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"param": {"type": "string"}, "value": {"type": "number"}, "rationale": {"type": "string"}},
+            "required": ["param", "value", "rationale"], "additionalProperties": False}},
     },
-    "required": ["summary", "worked", "failed", "lessons"],
+    "required": ["summary", "worked", "failed", "lessons", "proposals"],
     "additionalProperties": False,
 }
 
@@ -172,7 +180,7 @@ class RuleStrategy(Strategy):
     def review(self, payload: dict) -> dict:
         t = payload["today"]
         return {"summary": f"(ルールベース集計) 損益{t['pnl']:,.0f}円 取引{t['trades']}回 勝率{(t['win_rate'] or 0) * 100:.0f}%",
-                "worked": [], "failed": [], "lessons": []}
+                "worked": [], "failed": [], "lessons": [], "proposals": []}
 
     def evaluate(self, payload: dict) -> dict:
         checks = payload["checks"]

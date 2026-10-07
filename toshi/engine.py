@@ -37,6 +37,7 @@ class Engine:
     def __init__(self, cfg, db: DB, broker: Broker, data: DataProvider, strategy: Strategy, clock=now):
         self.cfg, self.db, self.broker, self.data, self.strategy = cfg, db, broker, data, strategy
         self.clock = clock
+        analytics.load_overrides(cfg, db)
         self.risk = RiskManager(cfg)
         self._run_lock = threading.Lock()
         self._stop = threading.Event()

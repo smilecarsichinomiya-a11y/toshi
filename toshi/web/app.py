@@ -99,6 +99,17 @@ def create_app(engine: Engine) -> FastAPI:
         return {"eval_days": cfg.eval_days, "days": analytics.cumulative(db)["days"],
                 "checks": analytics.checks(db, cfg.initial_cash), "result": json.loads(ev) if ev else None}
 
+    @app.get("/api/improvements", dependencies=[Depends(auth)])
+    def improvements():
+        return analytics.improvements(db)
+
+    @app.post("/api/improvements/{imp_id}", dependencies=[Depends(auth)])
+    def decide(imp_id: int, approve: bool):
+        r = analytics.decide_improvement(engine, imp_id, approve)
+        if r is None:
+            raise HTTPException(404, "承認待ちの提案が見つかりません")
+        return r
+
     @app.post("/api/daily/run", dependencies=[Depends(auth)])
     def daily_run(date: str | None = None):
         d = date or engine.clock().strftime("%Y-%m-%d")

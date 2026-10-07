@@ -249,3 +249,29 @@ def test_unaffordable_symbols_excluded():
     e.run_cycle()
     lim = e.cfg.max_position_pct * e.cfg.initial_cash
     assert all(f["one_lot_cost"] <= lim for f in seen.values())
+
+
+def test_improvement_loop(tmp_path):
+    """振り返りの提案は範囲に丸められて保存され、承認で初めて設定に反映、前後比較が付く。"""
+    class Prop(Greedy):
+        def review(self, payload):
+            assert "tunable" in payload and payload["applied_changes"] == []
+            return {"summary": "s", "worked": [], "failed": [], "lessons": [],
+                    "proposals": [{"param": "stop_loss_pct", "value": 0.0001, "rationale": "浅すぎる損切りで往復"},
+                                  {"param": "initial_cash", "value": 1e9, "rationale": "x"}]}
+
+    e = make_engine(Prop(), "10:00", tmp_path)
+    d0 = "2026-01-05"
+    e.db.execute("INSERT INTO equity(ts,equity,cash) VALUES(?,?,?)", (d0 + " 10:00:00", 500_000, 500_000))
+    e.db.execute("INSERT INTO equity(ts,equity,cash) VALUES(?,?,?)", (d0 + " 15:20:00", 505_000, 505_000))
+    analytics.run_daily(e, d0)
+    imps = analytics.improvements(e.db)
+    assert len(imps) == 1 and imps[0]["param"] == "stop_loss_pct"  # 未知の項目は捨てる
+    assert imps[0]["new_value"] == 0.008 and e.cfg.stop_loss_pct == 0.015  # 範囲に丸め・未承認では不変
+    analytics.decide_improvement(e, imps[0]["id"], True)
+    assert e.cfg.stop_loss_pct == 0.008
+    other = cfg()
+    analytics.load_overrides(other, e.db)  # 再起動後も維持
+    assert other.stop_loss_pct == 0.008
+    assert analytics.improvements(e.db)[0]["before"]["days"] == 1
+    assert analytics.decide_improvement(e, imps[0]["id"], False) is None  # 二重決定は不可

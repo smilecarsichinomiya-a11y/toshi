@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS decisions (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, symbol TEXT, action TEXT, lots INTEGER,
   confidence REAL, reason TEXT, outcome TEXT);
 CREATE TABLE IF NOT EXISTS equity (ts TEXT PRIMARY KEY, equity REAL, cash REAL);
+-- 改善提案(Claudeの振り返りが出し、人が承認したものだけ適用。適用前後の成績を比較する)
+CREATE TABLE IF NOT EXISTS improvements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, date TEXT, param TEXT, old_value REAL, new_value REAL,
+  rationale TEXT, status TEXT DEFAULT 'pending', decided_at TEXT, applied_from TEXT);
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, summary TEXT, strategy TEXT, error TEXT);
 """

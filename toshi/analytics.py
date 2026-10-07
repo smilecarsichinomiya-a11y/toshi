@@ -111,6 +111,7 @@ def run_daily(engine, date: str, with_review: bool = True) -> dict | None:
     review = None
     if with_review:
         review = make_review(engine, stats)
+        store_proposals(engine, date, review)
     db = engine.db
     vals = [stats[c] for c in COLS] + [json.dumps(stats["detail"], ensure_ascii=False),
                                        json.dumps(review, ensure_ascii=False) if review else None, ts()]
@@ -128,6 +129,9 @@ def make_review(engine, stats: dict) -> dict:
         "today": {k: stats[k] for k in COLS} | {"detail": stats["detail"]},
         "decisions": db.query("SELECT ts,symbol,action,lots,confidence,reason,outcome FROM decisions "
                               "WHERE ts LIKE ? AND action!='hold' ORDER BY id LIMIT 200", (stats["date"] + "%",)),
+        "tunable": {k: {"current": getattr(engine.cfg, k), "min": v[0], "max": v[1]} for k, v in TUNABLE.items()},
+        "applied_changes": applied_for_prompt(db),
+        "pending_proposals": db.query("SELECT param,new_value FROM improvements WHERE status='pending'"),
         "recent_days": [{k: r[k] for k in COLS} for r in
                         db.query("SELECT * FROM daily_stats WHERE date<? ORDER BY date DESC LIMIT 10", (stats["date"],))],
     }
@@ -254,3 +258,83 @@ def maybe_evaluate(engine) -> dict | None:
         with open(os.path.join(cfg.report_dir, f"evaluation_{c['days']}days.json"), "w", encoding="utf-8") as f:
             json.dump(ev | {"cumulative": payload["cumulative"]}, f, ensure_ascii=False, indent=1)
     return ev
+
+
+# --- 改善ループ: 提案 → 人が承認 → 適用 → 前後比較 ---
+# 変更を提案できる設定と範囲。範囲外の値は丸め、未知の項目は捨てる(暴走防止)
+TUNABLE = {
+    "stop_loss_pct": (0.008, 0.03), "take_profit_pct": (0.015, 0.06), "trailing_stop_pct": (0.008, 0.03),
+    "max_positions": (1, 3), "daily_loss_limit_pct": (0.01, 0.03), "cooldown_min": (0, 120),
+}
+
+
+def load_overrides(cfg, db: DB) -> None:
+    """承認済みの設定変更を、起動時に設定へ反映する。"""
+    for p in TUNABLE:
+        v = db.get(f"override_{p}")
+        if v is not None:
+            setattr(cfg, p, type(getattr(cfg, p))(float(v)))
+
+
+def store_proposals(engine, date: str, review: dict | None) -> None:
+    """振り返りの提案を検証して保存する(承認されるまで適用しない)。"""
+    db, cfg = engine.db, engine.cfg
+    if not review:
+        return
+    db.execute("DELETE FROM improvements WHERE date=? AND status='pending'", (date,))
+    busy = {r["param"] for r in db.query("SELECT param FROM improvements WHERE status='pending'")}
+    for p in review.get("proposals") or []:
+        name = p.get("param")
+        if name not in TUNABLE or name in busy:
+            continue
+        lo, hi = TUNABLE[name]
+        cur = getattr(cfg, name)
+        new = min(hi, max(lo, float(p.get("value"))))
+        new = int(round(new)) if isinstance(cur, int) else round(new, 4)
+        if new == cur:
+            continue
+        busy.add(name)
+        db.execute("INSERT INTO improvements(created_at,date,param,old_value,new_value,rationale) VALUES(?,?,?,?,?,?)",
+                   (ts(), date, name, cur, new, str(p.get("rationale") or "")))
+
+
+def decide_improvement(engine, imp_id: int, approve: bool) -> dict | None:
+    db, cfg = engine.db, engine.cfg
+    r = db.query("SELECT * FROM improvements WHERE id=? AND status='pending'", (imp_id,))
+    if not r:
+        return None
+    r = r[0]
+    if approve:
+        cur = getattr(cfg, r["param"])
+        setattr(cfg, r["param"], type(cur)(r["new_value"]))
+        db.set(f"override_{r['param']}", str(r["new_value"]))
+        # 適用は翌営業日から効く扱い: 集計済みの日(<=今日)は「適用前」に数える
+        db.execute("UPDATE improvements SET status='applied',decided_at=?,applied_from=? WHERE id=?",
+                   (ts(), engine.clock().strftime("%Y-%m-%d"), imp_id))
+    else:
+        db.execute("UPDATE improvements SET status='rejected',decided_at=? WHERE id=?", (ts(), imp_id))
+    return db.query("SELECT * FROM improvements WHERE id=?", (imp_id,))[0]
+
+
+def _period(rows: list[dict]) -> dict:
+    n = len(rows)
+    gw, gl = sum(r["gross_win"] or 0 for r in rows), sum(r["gross_loss"] or 0 for r in rows)
+    return {"days": n, "avg_pnl_pct": round(sum(r["pnl_pct"] or 0 for r in rows) / n, 3) if n else None,
+            "total_pnl": round(sum(r["pnl"] or 0 for r in rows)), "trades": sum(r["trades"] or 0 for r in rows),
+            "profit_factor": round(gw / gl, 2) if gl else None}
+
+
+def improvements(db: DB, limit: int = 30) -> list[dict]:
+    """改善提案の一覧。適用済みのものには、適用前後の成績を付ける。"""
+    out = db.query("SELECT * FROM improvements ORDER BY id DESC LIMIT ?", (limit,))
+    for r in out:
+        if r["status"] == "applied" and r["applied_from"]:
+            d = r["applied_from"]
+            r["before"] = _period(db.query("SELECT * FROM daily_stats WHERE date<=? ORDER BY date DESC LIMIT 10", (d,)))
+            r["after"] = _period(db.query("SELECT * FROM daily_stats WHERE date>? ORDER BY date", (d,)))
+    return out
+
+
+def applied_for_prompt(db: DB) -> list[dict]:
+    return [{k: r[k] for k in ("date", "param", "old_value", "new_value", "rationale", "before", "after")}
+            for r in improvements(db, 10) if r["status"] == "applied"]
