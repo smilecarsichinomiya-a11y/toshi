@@ -6,6 +6,9 @@ import threading
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
+import json
+
+from .. import analytics
 from ..engine import Engine, market_open
 
 HERE = os.path.dirname(__file__)
@@ -26,7 +29,7 @@ def create_app(engine: Engine) -> FastAPI:
     @app.get("/api/summary", dependencies=[Depends(auth)])
     def summary():
         broker = engine.broker
-        pos = broker.positions()
+        pos = engine.managed_positions()
         prices = {}
         for s in pos:
             px = engine.data.last_price(s)
@@ -44,6 +47,8 @@ def create_app(engine: Engine) -> FastAPI:
             "equity": equity, "cash": cash, "day_pnl": equity - start, "total_pnl": equity - base,
             "realized_pnl": realized, "last_run": engine.last_run, "last_error": engine.last_error,
             "market_view": last[0]["summary"] if last else "", "universe": cfg.universe,
+            "schedule": {"entry": f"{cfg.entry_start}-{cfg.entry_end}", "flatten": cfg.flatten_at,
+                         "review": cfg.review_at, "interval_min": cfg.interval_min},
             "limits": {"stop_loss": cfg.stop_loss_pct, "trailing": cfg.trailing_stop_pct,
                        "take_profit": cfg.take_profit_pct, "daily_loss": cfg.daily_loss_limit_pct,
                        "max_positions": cfg.max_positions, "max_position_pct": cfg.max_position_pct},
@@ -52,7 +57,7 @@ def create_app(engine: Engine) -> FastAPI:
     @app.get("/api/positions", dependencies=[Depends(auth)])
     def positions():
         out = []
-        for s, p in engine.broker.positions().items():
+        for s, p in engine.managed_positions().items():
             px = engine.data.last_price(s) or p.avg_price
             out.append({"symbol": s, "qty": p.qty, "avg_price": p.avg_price, "price": px,
                         "value": px * p.qty, "pnl": (px - p.avg_price) * p.qty,
@@ -74,6 +79,24 @@ def create_app(engine: Engine) -> FastAPI:
     @app.get("/api/runs", dependencies=[Depends(auth)])
     def runs():
         return db.query("SELECT * FROM runs ORDER BY id DESC LIMIT 30")
+
+    @app.get("/api/daily", dependencies=[Depends(auth)])
+    def daily(limit: int = 60):
+        rows = db.query("SELECT * FROM daily_stats ORDER BY date DESC LIMIT ?", (min(limit, 1000),))
+        for r in rows:
+            r["detail"] = json.loads(r["detail"]) if r["detail"] else None
+            r["review"] = json.loads(r["review"]) if r["review"] else None
+        return rows
+
+    @app.get("/api/cumulative", dependencies=[Depends(auth)])
+    def cumulative():
+        return analytics.cumulative(db)
+
+    @app.post("/api/daily/run", dependencies=[Depends(auth)])
+    def daily_run(date: str | None = None):
+        d = date or engine.clock().strftime("%Y-%m-%d")
+        st = analytics.run_daily(engine, d)
+        return {"date": d, "ok": st is not None}
 
     @app.post("/api/run", dependencies=[Depends(auth)])
     def run_now():

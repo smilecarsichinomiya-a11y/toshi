@@ -10,7 +10,13 @@ JST = timezone(timedelta(hours=9))
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS positions (symbol TEXT PRIMARY KEY, qty INTEGER, avg_price REAL);
-CREATE TABLE IF NOT EXISTS position_meta (symbol TEXT PRIMARY KEY, high_water REAL, opened_at TEXT);
+-- システム自身が建てたポジション(口座内の手動保有株には触れない)
+CREATE TABLE IF NOT EXISTS managed (symbol TEXT PRIMARY KEY, qty INTEGER, avg_price REAL, high_water REAL, opened_at TEXT);
+-- 日次成績 (毎日自動集計・蓄積)
+CREATE TABLE IF NOT EXISTS daily_stats (
+  date TEXT PRIMARY KEY, start_equity REAL, end_equity REAL, pnl REAL, pnl_pct REAL, realized REAL,
+  trades INTEGER, wins INTEGER, losses INTEGER, win_rate REAL, profit_factor REAL, gross_win REAL, gross_loss REAL,
+  avg_win REAL, avg_loss REAL, max_dd_pct REAL, bench_pct REAL, detail TEXT, review TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, symbol TEXT, side TEXT, qty INTEGER,
   price REAL, status TEXT, source TEXT, reason TEXT, broker_ref TEXT, pnl REAL);

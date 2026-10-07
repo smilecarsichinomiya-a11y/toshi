@@ -1,53 +1,89 @@
-# toshi — Claude が判断する日本株自動売買システム
+# toshi — Claude が判断する日本株デイトレード自動売買 (楽天証券)
 
-株価データを API で取得 → **Claude が buy / sell / hold を判断** → リスク管理で検査 → 自動発注。
+5分足を取得 → **Claude が buy / sell / hold を判断** → リスク管理で検査 → 自動発注 → **大引け前に全決済**。
+**毎日の成績を自動で集計・蓄積**し、Claude が振り返った教訓を翌日以降の判断に反映します。
 状況はブラウザのダッシュボードで管理できます。
 
 ```
-data (yfinance) ─▶ indicators ─▶ Claude(strategy) ─▶ RiskManager ─▶ Broker(paper / kabuステーション)
-                                       ▲                 │              │
-                          portfolio ───┘     強制損切り/利確 ┘          ▼
-                                                              SQLite ─▶ FastAPI ─▶ ダッシュボード
+5分足/日足 ─▶ 指標(VWAP・OR・RSI…) ─▶ Claude ─▶ RiskManager ─▶ Broker(paper / 楽天RSSブリッジ)
+                         ▲  教訓              │ 強制: 損切り・利確・トレーリング・15:15全決済
+                         │                    ▼
+            Claude振り返り ◀─ 日次成績集計(15:40) ◀─ SQLite ─▶ FastAPI ─▶ ダッシュボード
+                                   └─▶ data/reports/YYYY-MM-DD.json, daily_stats.csv
 ```
 
 ## クイックスタート
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env          # ANTHROPIC_API_KEY などを設定
-python -m toshi               # http://127.0.0.1:8000 を開く
+cp .env.example .env          # ANTHROPIC_API_KEY を設定
+python -m toshi               # http://127.0.0.1:8000
 python -m pytest              # テスト
 ```
 
-- 既定は **paper(仮想売買・資金300万円)**。実際のお金は動きません。
-- `ANTHROPIC_API_KEY` 未設定でも、単純なルールベース戦略で動作します(ダッシュボードに表示)。
-- 外部ネットワーク無しで試す場合: `TOSHI_DATA=synthetic`。
+- 既定は **paper(仮想売買・資金300万円)** です。実際のお金は動きません。
+- `ANTHROPIC_API_KEY` 未設定・API障害時は、ルールベース(VWAP/オープニングレンジ)に自動フォールバックします。
+- ネット接続なしで試す場合は `TOSHI_DATA=synthetic`。
 
-## 機能
+## 1日の流れ (JST・平日)
 
-| 領域 | 内容 |
+| 時刻 | 動作 |
 |---|---|
-| 戦略 | Claude に日足指標(SMA5/25/75, RSI, ATR, 20日高安, 出来高比)とポートフォリオを渡し、ツール呼び出しで構造化された売買判断(銘柄・単元数・確信度・理由)を取得。API失敗時はルールベースに自動フォールバック |
-| リスク管理 | Claude より優先。損切り7% / トレーリング10% / 利確20% の**強制執行**、1銘柄上限30%、最大5銘柄、現金10%維持、日次損失3%で新規買い停止、1日最大注文数、空売り禁止、100株単位。確信度0.55未満の買いは見送り |
-| ブローカー | `PaperBroker`(既定) / `KabuStationBroker`(auカブコム証券 kabuステーション API・現物成行) |
-| スケジューラ | 立会時間(平日 9:00–11:30 / 12:30–15:30 JST)中に `TOSHI_INTERVAL_MIN` 分間隔で実行 |
-| ダッシュボード | 総資産/損益、資産推移、保有、Claude の判断と理由ログ(却下理由つき)、注文履歴、**手動実行**、**キルスイッチ**(新規買い停止) |
+| 9:00〜 | 5分ごとに判断。寄り直後(〜9:05)は新規エントリーしない |
+| 9:05〜14:45 | 新規エントリー可(前場引け前後 11:25〜12:35 を除く) |
+| 14:45〜15:15 | 新規買いなし。Claude は手仕舞いのみ判断 |
+| **15:15〜** | **全ポジションを強制決済**(持ち越しなし) |
+| **15:40** | **日次成績を集計 → Claude が振り返り → DB とファイルに保存** |
 
-## 実売買(live)に切り替える前に
+## 成績検証 (毎日必ず)
 
-1. 実売買には `TOSHI_MODE=live` **かつ** `TOSHI_LIVE_CONFIRM=yes` の両方が必要です。
-2. `KabuStationBroker` は **実環境で未検証**です。kabuステーションの検証用ポート(`:18081`)で、まず動作確認してください。
-3. 最低でも数週間 paper で成績・判断ログ・リスク挙動を確認してください。
-4. 株価データ(yfinance)は遅延・欠損があり得ます。実運用では J-Quants や証券会社の板情報 API への差し替えを推奨します (`toshi/data.py` の `DataProvider` を実装)。
-5. 祝日・年末年始の休場は未考慮です(データが更新されないだけで誤発注は起きにくい設計)。
-6. ダッシュボードを `127.0.0.1` 以外に公開する場合は `TOSHI_DASH_TOKEN` が必須です(未設定だと起動しません)。
-7. **本システムは利益を保証しません。投資判断・損失の責任は利用者にあります。**
+- **自動実行**: 毎営業日 15:40 に集計します。停止していた日があれば、次回起動時に**未集計日をすべて集計**します(取りこぼし防止)。
+- **指標**: 損益・騰落率、取引数、勝率、プロフィットファクター、平均勝ち/負け、日中最大ドローダウン、平均保有時間、TOPIX連動ETF(1306)との比較。決済理由別・銘柄別・エントリー時間帯別の内訳もあります。
+- **累計**: 検証日数、勝ち日数、累計損益、平均日次リターン、取引勝率、PF、最大ドローダウン、年率シャープレシオ、累計損益カーブ。
+- **振り返り**: Claude が勝因・敗因と翌日以降の教訓(最大5個)をまとめます。教訓は**直近5日分が毎回の売買判断に渡されます**。
+- **蓄積先**: `data/toshi.db`(daily_stats テーブル)、`data/reports/YYYY-MM-DD.json`(全取引つき)、`data/reports/daily_stats.csv`(Excel で開けます)。
+  `data/` は git 管理外なので、**定期的にバックアップ**してください。
+- 手動で再集計する場合: `curl -X POST "localhost:8000/api/daily/run?date=2026-10-07"`
+
+## リスク管理 (Claude の判断より優先)
+
+損切り1% / 利確2% / トレーリング1% の強制執行、15:15 の全決済、持ち越し解消、最大3銘柄、1銘柄の上限は資産の33%、
+日次損失2%で新規買い停止、決済後15分のクールダウン、同一銘柄の往復は1日3回まで、空売り禁止、100株単位、
+確信度0.55未満の買いは見送り、キルスイッチ(新規買い停止)。
+**口座に手動で保有している株には触れません**(システムが建てたポジションのみ管理)。
+
+## 楽天証券との接続 (live)
+
+楽天証券には個人向けの公式 REST 発注 API が無いため、**マーケットスピードII RSS(Windows の Excel + VBA)とファイルで連携**します。
+
+```
+toshi(Python) ──orders/<id>.txt──▶ Excel(VBA+RSS) ──▶ 楽天証券
+              ◀──fills/<id>.txt───  (約定結果)
+              ◀──state.txt──────── (余力・保有。2秒ごと更新。180秒更新が無ければ取引停止)
+```
+
+1. マーケットスピードII にログインし、RSS 付きの Excel を開きます。
+2. `bridge/RakutenBridge.bas` をインポートし、`BRIDGE_DIR` を `TOSHI_BRIDGE_DIR` と同じ場所に設定します。
+3. **`PlaceOrderViaRss` / `GetCashViaRss` / `GetPositionsViaRss` は未実装のスタブです。**
+   楽天証券の RSS 公式マニュアルにある発注・余力・建玉の関数で実装してください(未実装のままでは、全注文が rejected になり発注されません)。
+4. `TOSHI_MODE=live` と `TOSHI_LIVE_CONFIRM=yes` を設定し、`StartBridge` を実行します。
+
+### 実売買の前の注意
+- **最低でも数週間〜1か月は paper で運用し、日次成績(勝率・PF・TOPIX比)を確認してから**移行してください。
+- 実売買は少額・1銘柄・画面監視つきで始めてください。約定確認がタイムアウトした場合は、注文が出ている可能性があるため楽天証券側で確認してください。
+- yfinance の5分足は遅延・欠損があり得ます。デイトレでは致命的になり得るため、実運用では RSS のリアルタイム株価への差し替えを推奨します(`toshi/data.py` の `DataProvider` を実装)。
+- 5分間隔の監視なので、損切りは設定値より滑ることがあります。現物ロングのみで、空売りや信用取引には対応していません。
+- 祝日・年末年始の休場は未考慮です(データが無いため何もしません)。
+- Claude API は5分ごと×12銘柄で1日約70回呼び出します。API 料金に注意してください。
+- ダッシュボードを外部公開する場合は `TOSHI_DASH_TOKEN` が必須です。
+- **本システムは利益を保証しません。投資判断・損失の責任は利用者にあります。**
 
 ## 構成
 
 ```
-toshi/config.py    設定(.env)           toshi/risk.py      リスク管理・強制エグジット
-toshi/data.py      株価データ取得        toshi/broker.py    Paper / kabuステーション
-toshi/indicators.py 指標計算             toshi/engine.py    1サイクルの実行・スケジューラ
-toshi/strategy.py  Claude戦略 + fallback toshi/web/        FastAPI + ダッシュボード(index.html)
+toshi/config.py      設定(.env)               toshi/risk.py       リスク管理・強制エグジット
+toshi/data.py        5分足/日足取得           toshi/broker.py     Paper / 楽天RSSブリッジ
+toshi/indicators.py  デイトレ用指標           toshi/engine.py     判断サイクル・時間割・スケジューラ
+toshi/strategy.py    Claude戦略・振り返り     toshi/analytics.py  日次成績の集計・蓄積・累計
+toshi/web/           FastAPI + ダッシュボード  bridge/RakutenBridge.bas  Excel(RSS)側 VBA 雛形
 ```

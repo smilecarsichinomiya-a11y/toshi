@@ -3,8 +3,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-import requests
-
 from .db import DB, ts
 
 log = logging.getLogger("toshi.broker")
@@ -73,60 +71,77 @@ class PaperBroker(Broker):
         return Fill(True, px, ref=f"paper-{ts()}")
 
 
-class KabuStationBroker(Broker):
-    """auカブコム証券「kabuステーション API」経由の実発注 (現物・成行・特定口座)。
+class RakutenRssBroker(Broker):
+    """楽天証券 マーケットスピードII RSS 経由の実発注 (現物・成行)。
 
-    ※ 実環境での検証は未実施です。必ず検証用ポート(18081)・少額で動作確認してください。
+    楽天証券に個人向けの公式 REST API は無いため、Windows 上の Excel(RSS + VBA) とファイルで連携する:
+      Python → {bridge}/orders/<id>.txt  (注文指示)   → VBA が RSS で発注
+      VBA    → {bridge}/fills/<id>.txt   (約定結果)   → Python が読む
+      VBA    → {bridge}/state.txt        (余力・建玉。定期更新) → Python が読む
+    VBA 側の雛形は bridge/RakutenBridge.bas。RSS 発注関数の呼び出し部分は未実装(要・公式マニュアル参照)。
+    ※ 実環境で未検証。必ず少額で動作確認してください。
     """
 
-    name = "kabustation"
+    name = "rakuten-rss"
+    STATE_MAX_AGE_SEC = 180
 
-    def __init__(self, base_url: str, password: str):
-        self.base, self.password, self._token = base_url.rstrip("/"), password, ""
+    def __init__(self, bridge_dir: str, fill_timeout: int = 90):
+        import os
 
-    def _h(self) -> dict:
-        if not self._token:
-            r = requests.post(f"{self.base}/token", json={"APIPassword": self.password}, timeout=10)
-            r.raise_for_status()
-            self._token = r.json()["Token"]
-        return {"X-API-KEY": self._token}
+        self.dir, self.timeout = bridge_dir, fill_timeout
+        for sub in ("orders", "fills"):
+            os.makedirs(os.path.join(bridge_dir, sub), exist_ok=True)
 
-    def _req(self, method: str, path: str, **kw):
-        r = requests.request(method, self.base + path, headers=self._h(), timeout=15, **kw)
-        if r.status_code == 401:  # トークン失効
-            self._token = ""
-            r = requests.request(method, self.base + path, headers=self._h(), timeout=15, **kw)
-        r.raise_for_status()
-        return r.json()
+    def _state(self) -> dict:
+        import os
+        from datetime import datetime
+
+        path = os.path.join(self.dir, "state.txt")
+        if not os.path.exists(path):
+            raise RuntimeError("RSSブリッジの state.txt がありません(Excelブリッジ未起動)")
+        kv: dict = {"pos": []}
+        for line in open(path, encoding="utf-8"):
+            if "=" in line:
+                k, v = line.strip().split("=", 1)
+                kv["pos"].append(v) if k == "pos" else kv.__setitem__(k, v)
+        age = (datetime.now() - datetime.strptime(kv["updated"], "%Y-%m-%d %H:%M:%S")).total_seconds()
+        if age > self.STATE_MAX_AGE_SEC:
+            raise RuntimeError(f"RSSブリッジの状態が{age:.0f}秒更新されていません(Excel停止?)")
+        return kv
 
     def cash(self) -> float:
-        return float(self._req("GET", "/wallet/cash").get("StockAccountWallet", 0))
+        return float(self._state()["cash"])
 
     def positions(self) -> dict[str, Position]:
-        out: dict[str, Position] = {}
-        for p in self._req("GET", "/positions", params={"product": 1}):
-            qty = int(p["LeavesQty"])
-            if qty > 0:
-                out[p["Symbol"]] = Position(p["Symbol"], qty, float(p["Price"]))
+        out = {}
+        for row in self._state()["pos"]:
+            sym, qty, avg = row.split(",")
+            if int(qty) > 0:
+                out[sym] = Position(sym, int(qty), float(avg))
         return out
 
     def order(self, symbol: str, side: str, qty: int, ref_price: float) -> Fill:
-        body = {
-            "Password": self.password, "Symbol": symbol, "Exchange": 1, "SecurityType": 1,
-            "Side": "2" if side == "buy" else "1", "CashMargin": 1,
-            "DelivType": 2 if side == "buy" else 0, "FundType": "AA" if side == "buy" else "  ",
-            "AccountType": 4, "Qty": qty, "FrontOrderType": 10, "Price": 0, "ExpireDay": 0,
-        }
-        try:
-            res = self._req("POST", "/sendorder", json=body)
-        except Exception as e:  # noqa: BLE001
-            return Fill(False, ref_price, message=str(e))
-        if res.get("Result") == 0:
-            return Fill(True, ref_price, ref=str(res.get("OrderId")), message="発注受付(約定価格は証券会社側で確定)")
-        return Fill(False, ref_price, message=str(res))
+        import os
+        import time
+        import uuid
+
+        oid = uuid.uuid4().hex[:12]
+        tmp = os.path.join(self.dir, "orders", oid + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(f"id={oid}\nsymbol={symbol}\nside={side}\nqty={qty}\ntype=market\n")
+        os.replace(tmp, tmp[:-4] + ".txt")
+        fpath = os.path.join(self.dir, "fills", oid + ".txt")
+        deadline = time.time() + self.timeout
+        while time.time() < deadline:
+            if os.path.exists(fpath):
+                kv = dict(l.strip().split("=", 1) for l in open(fpath, encoding="utf-8") if "=" in l)
+                ok = kv.get("status") == "filled"
+                return Fill(ok, float(kv.get("price") or ref_price), ref=oid, message=kv.get("message", ""))
+            time.sleep(1)
+        return Fill(False, ref_price, ref=oid, message="約定確認タイムアウト(注文が出ている可能性あり。楽天証券で要確認)")
 
 
 def make_broker(cfg, db: DB) -> Broker:
     if cfg.live:
-        return KabuStationBroker(cfg.kabu_url, cfg.kabu_password)
+        return RakutenRssBroker(cfg.bridge_dir)
     return PaperBroker(db, cfg.initial_cash)

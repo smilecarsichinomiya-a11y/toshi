@@ -39,11 +39,13 @@ class RiskManager:
         self.cfg = cfg
 
     def review(self, decisions: list[dict], positions, prices: dict[str, float], cash: float,
-               equity: float, orders_today: int, day_start_equity: float, halted: bool
+               equity: float, orders_today: int, day_start_equity: float, halted: bool,
+               can_enter: bool = True, blocked: dict[str, str] | None = None
                ) -> tuple[list[Order], dict[str, str]]:
         """Claude の売買案を検査し、実行可能な注文だけ返す。(orders, {symbol: 却下/調整理由})"""
         cfg, lot = self.cfg, self.cfg.lot_size
         notes: dict[str, str] = {}
+        blocked = blocked or {}
         orders: list[Order] = []
         budget = cash
         held = {s: p.qty for s, p in positions.items()}
@@ -75,6 +77,12 @@ class RiskManager:
             elif act == "buy":
                 if halted:
                     notes[sym] = "キルスイッチ作動中(新規買い停止)"
+                    continue
+                if not can_enter:
+                    notes[sym] = "新規エントリー時間外(寄り直後/大引け前/昼休み)"
+                    continue
+                if sym in blocked:
+                    notes[sym] = blocked[sym]
                     continue
                 if loss_hit:
                     notes[sym] = "日次損失上限に到達(新規買い停止)"
