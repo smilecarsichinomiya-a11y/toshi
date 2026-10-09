@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from .universe import SIGNAL_UNIVERSE
+
 
 def _load_dotenv(path: str = ".env") -> None:
     if not os.path.exists(path):
@@ -33,6 +35,21 @@ DEFAULT_UNIVERSE = ("8306,8411,8316,8604,8601,9432,9434,4755,4689,7201,7267,6752
 
 @dataclass
 class Config:
+    # --- 動作モード: signals(毎晩の日足シグナルを通知。既定) / daytrade(旧: 日中の仮想デイトレ) ---
+    mode: str = "signals"
+    signal_at: str = "18:00"  # 毎営業日、この時刻以降にシグナルを判定する
+    signal_universe: list[str] = field(default_factory=list)
+    signal_pos_pct: float = 0.25  # 1銘柄の上限(総資産に対する割合)
+    signal_max_positions: int = 4
+    signal_cost_pct: float = 0.002  # 片道のコスト(スプレッド等)の仮定
+    notify_empty: bool = False  # シグナルが無い日にも通知する
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    mail_to: str = ""
+    line_token: str = ""  # LINE Messaging API のチャネルアクセストークン
+    line_user_id: str = ""
     data_source: str = "yfinance"
     universe: list[str] = field(default_factory=list)
     benchmark: str = "1306"  # TOPIX連動ETF。日次成績の比較対象
@@ -74,7 +91,22 @@ class Config:
 def load_config() -> Config:
     _load_dotenv()
     uni = _s("TOSHI_UNIVERSE", DEFAULT_UNIVERSE)
+    sig = _s("TOSHI_SIGNAL_UNIVERSE", "")
     cfg = Config(
+        mode=_s("TOSHI_MODE", "signals"),
+        signal_at=_s("TOSHI_SIGNAL_AT", "18:00"),
+        signal_universe=[u.strip() for u in sig.split(",") if u.strip()] or list(SIGNAL_UNIVERSE),
+        signal_pos_pct=_f("TOSHI_SIGNAL_POS_PCT", 0.25),
+        signal_max_positions=_i("TOSHI_SIGNAL_MAX_POSITIONS", 4),
+        signal_cost_pct=_f("TOSHI_SIGNAL_COST_PCT", 0.002),
+        notify_empty=_s("TOSHI_NOTIFY_EMPTY", "no").lower() == "yes",
+        smtp_host=_s("TOSHI_SMTP_HOST", ""),
+        smtp_port=_i("TOSHI_SMTP_PORT", 587),
+        smtp_user=_s("TOSHI_SMTP_USER", ""),
+        smtp_password=_s("TOSHI_SMTP_PASSWORD", ""),
+        mail_to=_s("TOSHI_MAIL_TO", ""),
+        line_token=_s("TOSHI_LINE_TOKEN", ""),
+        line_user_id=_s("TOSHI_LINE_USER_ID", ""),
         data_source=_s("TOSHI_DATA", "yfinance"),
         universe=[u.strip() for u in uni.split(",") if u.strip()],
         benchmark=_s("TOSHI_BENCHMARK", "1306"),

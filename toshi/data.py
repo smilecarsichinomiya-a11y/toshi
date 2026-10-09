@@ -12,6 +12,18 @@ from .db import JST, now
 log = logging.getLogger("toshi.data")
 
 
+def naive_daily(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """日足の index を、時刻・タイムゾーンなしの日付にそろえる。"""
+    if df is None or df.empty:
+        return None
+    idx = pd.DatetimeIndex(df.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert(JST).tz_localize(None)
+    out = df.copy()
+    out.index = idx.normalize()
+    return out[~out.index.duplicated(keep="last")].sort_index()
+
+
 class DataProvider:
     def history(self, symbol: str, days: int = 200) -> pd.DataFrame | None:
         """日足"""
@@ -20,6 +32,10 @@ class DataProvider:
     def intraday(self, symbol: str) -> pd.DataFrame | None:
         """5分足(直近数営業日, JST tz-aware index)"""
         raise NotImplementedError
+
+    def daily(self, symbol: str, years: int = 3) -> pd.DataFrame | None:
+        """日足(index は日付のみ)。シグナル判定・バックテスト用。"""
+        return naive_daily(self.history(symbol, years * 250))
 
     def last_price(self, symbol: str) -> float | None:
         df = self.intraday(symbol)
@@ -48,7 +64,7 @@ class YFinanceProvider(DataProvider):
     def _get(self, symbol: str, period: str, interval: str, ttl: int) -> pd.DataFrame | None:
         import yfinance as yf
 
-        key = (symbol, interval)
+        key = (symbol, interval, period)
         hit = self._cache.get(key)
         if hit and time.time() - hit[0] < ttl:
             return hit[1]
@@ -71,6 +87,9 @@ class YFinanceProvider(DataProvider):
 
     def intraday(self, symbol: str):
         return self._get(symbol, "5d", "5m", 60)
+
+    def daily(self, symbol: str, years: int = 3):
+        return naive_daily(self._get(symbol, f"{years}y", "1d", 600))
 
 
 class SyntheticProvider(DataProvider):

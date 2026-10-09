@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("toshi_theme")||"dark"}catch(e){document.documentElement.dataset.theme="dark"}</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>toshi シグナル管理</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1c2330;--mut:#6b7686;--bd:#e3e7ee;--up:#d6336c;--dn:#1c7ed6;--ok:#2f9e44;--warn:#e8590c}
+:root[data-theme="dark"]{--bg:#10141b;--card:#181e28;--fg:#e6eaf0;--mut:#8b96a8;--bd:#283042;--up:#ff6b9a;--dn:#5aa9ff;--ok:#51cf66;--warn:#ff922b;color-scheme:dark}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--bd);background:var(--card)}
+h1{font-size:18px;margin:0;margin-right:auto}
+.badge{padding:2px 10px;border-radius:99px;font-size:12px;font-weight:600;border:1px solid var(--bd)}
+.paper{color:var(--ok)}
+main{padding:16px;max-width:1200px;margin:auto;display:grid;gap:16px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;overflow:auto}
+.k .l{color:var(--mut);font-size:12px}.k .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.up{color:var(--up)}.dn{color:var(--dn)}.ok{color:var(--ok)}
+h2{font-size:14px;margin:0 0 8px;color:var(--mut)}h3{font-size:13px;margin:14px 0 4px}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--bd);white-space:nowrap}
+th:first-child,td:first-child,td.t,th.t{text-align:left}td.t{white-space:normal;min-width:150px}
+th{color:var(--mut);font-weight:500;font-size:12px}
+button{font:inherit;padding:6px 14px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--fg);cursor:pointer}
+button.s{padding:2px 10px;font-size:12px}button:disabled{opacity:.5}
+canvas{width:100%;height:200px;display:block}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px}
+.mut{color:var(--mut)}.err{color:var(--warn)}
+.buy{color:var(--up);font-weight:600}.sell{color:var(--dn);font-weight:600}
+ul{margin:4px 0;padding-left:20px}li{margin:3px 0}
+.note{border-left:3px solid var(--warn);padding:6px 10px;margin:8px 0;background:rgba(232,89,12,.08)}
+</style>
+</head>
+<body>
+<header>
+  <h1>📈 toshi 日本株シグナル管理 <span class="mut" style="font-size:12px;font-weight:400">ペーパートレード(自動発注はしません)</span></h1>
+  <span class="badge paper">PAPER</span><span id="last" class="badge"></span>
+  <button id="run" title="最新の日足でシグナルを判定します">今すぐ判定</button>
+  <button id="ntest">通知テスト</button>
+  <button id="theme" title="黒系 / 白系の切り替え">🌙</button>
+  <button id="tok" title="TOSHI_DASH_TOKEN を設定した場合">🔑</button>
+</header>
+<main>
+  <div class="kpis" id="kpis"></div>
+  <div class="card" id="status"></div>
+  <div class="card"><h2>最新のシグナル <span class="mut" id="latestdate"></span></h2><div id="latest" class="mut">まだシグナルがありません</div></div>
+  <div class="card"><h2>シグナル履歴と、実際に注文したかの記録</h2>
+    <div class="mut" style="margin-bottom:6px">「注文した」「見送り」を押して記録します(あとから直せます)。ペーパー口座は、すべてのシグナルを実行した前提で計算します。</div>
+    <table id="hist"></table></div>
+  <div class="card"><h2>売買ルール(初心者向け)</h2><div id="rules"></div></div>
+  <div class="card"><h2>バックテスト(過去の日足に同じルールを当てはめた結果)</h2><div id="bt" class="mut">計算中です。初回は数分かかります。</div></div>
+  <div class="card"><h2>ペーパー口座の資産推移</h2><canvas id="chart"></canvas></div>
+  <div class="two">
+    <div class="card"><h2>保有中(ペーパー)</h2><table id="pos"></table></div>
+    <div class="card"><h2>決済済みの取引(ペーパー)</h2><table id="trades"></table></div>
+  </div>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+let token=localStorage.getItem('toshi_token')||'';
+async function api(p,opt={}){const r=await fetch(p,{...opt,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}});
+  if(r.status===401){const t=prompt('ダッシュボードのトークンを入力');if(t){token=t;localStorage.setItem('toshi_token',t);return api(p,opt)}throw new Error('401')}
+  if(!r.ok)throw new Error(await r.text());return r.json()}
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const yen=n=>n==null?'-':(n<0?'-':'')+'¥'+Math.abs(Math.round(n)).toLocaleString();
+const cls=n=>n>0?'up':n<0?'dn':'';
+const pct=(n,d=1)=>n==null?'-':(n>0?'+':'')+n.toFixed(d)+'%';
+const rate=n=>n==null?'-':(n*100).toFixed(0)+'%';
+function table(el,cols,rows){el.innerHTML='<tr>'+cols.map(c=>`<th class="${c[2]||''}">${c[0]}</th>`).join('')+'</tr>'+
+  (rows.length?rows.map(r=>'<tr>'+cols.map(c=>`<td class="${c[2]||''}">${c[1](r)}</td>`).join('')+'</tr>').join(''):`<tr><td colspan="${cols.length}" class="mut">まだありません</td></tr>`)}
+function draw(cv,v,labels){const dpr=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;cv.width=w*dpr;cv.height=h*dpr;const g=cv.getContext('2d');g.scale(dpr,dpr);g.clearRect(0,0,w,h);
+  const cs=getComputedStyle(document.body);g.fillStyle=cs.getPropertyValue('--mut');g.font='12px sans-serif';
+  if(v.length<2){g.fillText('データ蓄積中…(判定が2日分たまると表示されます)',8,20);return}
+  const mn=Math.min(...v),mx=Math.max(...v),pad=(mx-mn)*.1||1,L=64,B=18;
+  const x=i=>L+i*(w-L-8)/(v.length-1),y=a=>(h-B-6)-(a-(mn-pad))/(mx-mn+2*pad)*(h-B-12);
+  g.strokeStyle=cs.getPropertyValue('--bd');
+  for(let k=0;k<=3;k++){const a=mn-pad+(mx-mn+2*pad)*k/3;g.beginPath();g.moveTo(L,y(a));g.lineTo(w-8,y(a));g.stroke();g.fillText(yen(a),2,y(a)+4)}
+  g.strokeStyle=cs.getPropertyValue(v.at(-1)>=v[0]?'--up':'--dn');g.lineWidth=2;g.beginPath();v.forEach((a,i)=>i?g.lineTo(x(i),y(a)):g.moveTo(x(i),y(a)));g.stroke();
+  g.fillStyle=cs.getPropertyValue('--mut');g.fillText(labels[0],L,h-3);g.textAlign='right';g.fillText(labels.at(-1),w-8,h-3);g.textAlign='left'}
+
+const side=r=>r.side==='buy'?'<span class="buy">買い</span>':'<span class="sell">売り</span>';
+const paperState=r=>r.status==='filled'?`約定 ${r.fill_date} @${Math.round(r.fill_price).toLocaleString()}`:r.status==='cancelled'?`見送り(${esc(r.note||'')})`:'<span class="mut">翌営業日に約定予定</span>';
+const userState=r=>r.user_action==='ordered'?`<span class="ok">注文した</span>${r.user_price?' @'+Number(r.user_price).toLocaleString():''}${r.user_shares?' '+r.user_shares+'株':''}`:r.user_action==='skipped'?'<span class="mut">見送り</span>':'<span class="err">未記録</span>';
+const btns=r=>`<button class="s" onclick="act(${r.id},'ordered',${r.shares})">注文した</button> <button class="s" onclick="act(${r.id},'skipped')">見送り</button>`+(r.user_action?` <button class="s" onclick="act(${r.id},'clear')">取消</button>`:'');
+const rec=r=>userState(r)+'<br>'+btns(r);
+const COLS=[['判定日',r=>r.as_of],['銘柄',r=>esc(r.name)+' ('+r.symbol+')','t'],['売買',side],['推奨株数',r=>r.shares.toLocaleString()],
+  ['概算金額',r=>yen(r.est_amount)],['損切り価格',r=>r.stop_price?yen(r.stop_price):'-'],['理由',r=>esc(r.reason),'t'],['ペーパー口座',paperState,'t'],['あなたの記録(実際に注文したか)',rec,'t']];
+
+async function act(id,kind,shares){
+  let body={action:kind};
+  if(kind==='ordered'){const p=prompt('約定した価格(円)。分からなければ空欄のまま OK','');if(p===null)return;const n=prompt('実際に買った/売った株数',shares);if(n===null)return;
+    body.price=p?Number(p):null;body.shares=n?parseInt(n):null}
+  await api('/api/swing/signals/'+id+'/action',{method:'POST',body:JSON.stringify(body)});refresh()}
+
+const li=a=>'<ul>'+a.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>';
+function renderRules(d){const r=d.rules;
+  $('#rules').innerHTML=`<p>${esc(r.outline)}</p><h3>${esc(r.buy_title)}</h3>${li(r.buy)}<h3>${esc(r.sell_title)}</h3>${li(r.sell)}<h3>${esc(r.stop_title)}</h3>${li(r.stop)}<h3>${esc(r.size_title)}</h3>${li(r.size)}<h3>前提・注意</h3>${li(r.notes)}`;
+  const b=d.backtest;
+  if(!b){$('#bt').innerHTML=d.bt_running?'計算中です(数分かかります)…':'まだ計算されていません。';return}
+  if(b.error){$('#bt').textContent=b.error;return}
+  const ws=Object.entries(b.windows);
+  const row=(l,f)=>`<tr><td>${l}</td>`+ws.map(([k,m])=>`<td>${f(m)}</td>`).join('')+'</tr>';
+  $('#bt').className='';
+  $('#bt').innerHTML=`<div class="mut">対象 ${b.symbols}銘柄 / データの最終日 ${b.end} / 計算日時 ${esc(b.ts)}${d.bt_running?' / 再計算中…':''}</div>
+  <table style="margin-top:8px"><tr><th></th>${ws.map(([k,m])=>`<th>直近${k}</th>`).join('')}</tr>
+  ${row('売買回数',m=>m.trades+'回')}${row('勝率(利益が出た取引の割合)',m=>rate(m.win_rate))}
+  ${row('最大下落幅(資金が最高値から一番減った割合)',m=>`<b class="dn">-${m.max_dd_pct}%</b>`)}
+  ${row('期間の損益(資金に対して)',m=>`<span class="${cls(m.total_return_pct)}">${pct(m.total_return_pct)}</span>`)}
+  ${row('PF(総利益÷総損失。1より大きければ利益超過)',m=>m.profit_factor??'-')}
+  ${row('1回あたりの平均損益',m=>pct(m.avg_pnl_pct,2))}${row('平均の保有日数',m=>m.avg_hold_days==null?'-':m.avg_hold_days+'日')}
+  ${row('(参考)TOPIX連動ETFを持ち続けた場合',m=>pct(m.bench_return_pct))}</table>
+  ${ws.some(([k,m])=>m.trades<30)?'<div class="note">売買回数が30回未満の期間があります。回数が少ないと、成績は偶然の影響が大きく、あてになりません。</div>':''}
+  <div class="note"><b>この結果の読み方(良く見えすぎる理由)</b>${li([
+   '「今の」代表的な大型株だけで検証しています。過去に人気がなくなった銘柄は含まれないため、成績が良く見えがちです。',
+   '約定は翌営業日の始値にコスト(片道0.2%)を見込んだ仮定で、実際の約定価格とは異なります。',
+   '損切りは終値で判定するため、日中の急落やギャップで、損切り価格より大きく下がることがあります(この結果にも反映されています)。',
+   '過去の成績は、将来の利益を保証しません。相場の地合いが変わると、同じルールでも成績は大きく変わります。'])}</div>`}
+
+async function refresh(){
+  try{
+    const [s,sigs,pos,tr,eq,rules]=await Promise.all([api('/api/swing/summary'),api('/api/swing/signals?limit=300'),api('/api/swing/positions'),api('/api/swing/trades'),api('/api/swing/equity'),api('/api/swing/rules')]);
+    $('#last').textContent='最終判定日: '+(s.last_date||'まだ');
+    const k=(l,v,c='')=>`<div class="card k"><div class="l">${l}</div><div class="v ${c}">${v}</div></div>`;
+    const a=s.adherence,ans=a.ordered+a.skipped;
+    $('#kpis').innerHTML=k('総資産(ペーパー)',yen(s.equity))+k('現金',yen(s.cash))+k('累計損益',yen(s.total_pnl),cls(s.total_pnl))+k('保有銘柄',s.positions+' / '+s.max_positions)+k('決済した取引',s.trades+'回(勝率 '+rate(s.win_rate)+')')+k('実際に注文した割合',ans?rate(a.ordered/ans)+`(${a.ordered}/${ans})`:'-');
+    const ch=s.channels.length?`<span class="ok">通知先: ${s.channels.join('・')}</span>`:'<span class="err">通知先が未設定です。.env にメールまたは LINE の設定を入れてください(README の「通知の設定」)。</span>';
+    $('#status').innerHTML=`平日 ${esc(s.signal_at)} 以降に、日足でシグナルを判定します(パソコンを起動しておいてください)。 ${ch}`+
+      (s.last_run?`<div class="mut">前回: ${esc(s.last_run.ts)} / ${esc(s.last_run.note||'')} / 通知 ${esc(s.last_run.notified||'-')}</div>`:'')+
+      (s.running?'<div>判定中…</div>':'')+(s.last_error?`<div class="err">⚠ ${esc(s.last_error)}</div>`:'');
+    const latest=sigs.length?sigs[0].as_of:null,lt=sigs.filter(r=>r.as_of===latest);
+    $('#latestdate').textContent=latest?`(${latest} の引け後に判定)`:'';
+    if(lt.length){$('#latest').className='';$('#latest').innerHTML='<table id="lt"></table>';table($('#lt'),COLS.slice(1),lt)}
+    else{$('#latest').className='mut';$('#latest').textContent=s.last_date?`${s.last_date} はシグナルなしでした(条件を満たす銘柄・保有中の売り条件が無い日です)。`:'まだ判定されていません。「今すぐ判定」を押すか、平日の夜をお待ちください。'}
+    table($('#hist'),COLS,sigs);
+    table($('#pos'),[['銘柄',r=>esc(r.name)+' ('+r.symbol+')','t'],['株数',r=>r.shares],['取得単価',r=>Math.round(r.avg_price).toLocaleString()],['損切り価格',r=>yen(r.stop_price)],['評価損益',r=>`<span class="${cls(r.pnl)}">${yen(r.pnl)} (${pct(r.pnl_pct)})</span>`],['取得日',r=>r.entry_date]],pos);
+    table($('#trades'),[['決済日',r=>r.exit_date],['銘柄',r=>esc(r.name)+' ('+r.symbol+')','t'],['株数',r=>r.shares],['損益',r=>`<span class="${cls(r.pnl)}">${yen(r.pnl)} (${pct(r.pnl_pct)})</span>`],['理由',r=>esc(r.reason),'t']],tr);
+    draw($('#chart'),eq.map(r=>r.equity),eq.length?[eq[0].date,eq.at(-1).date]:[]);
+    renderRules(rules);
+  }catch(e){console.error(e)}}
+$('#run').onclick=async()=>{$('#run').disabled=true;await api('/api/swing/run',{method:'POST'});setTimeout(()=>{$('#run').disabled=false;refresh()},6000)};
+$('#ntest').onclick=async()=>{const r=await api('/api/swing/notify_test',{method:'POST'});alert(r.configured?r.results.map(x=>x.channel+': '+(x.ok?'送信しました':'失敗 '+x.error)).join('\n'):'通知先が未設定です。.env にメールまたは LINE の設定を入れてください。')};
+const setTheme=t=>{document.documentElement.dataset.theme=t;$('#theme').textContent=t==='dark'?'☀':'🌙';try{localStorage.setItem('toshi_theme',t)}catch(e){}};
+setTheme(document.documentElement.dataset.theme);
+$('#theme').onclick=()=>{setTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');refresh()};
+$('#tok').onclick=()=>{const t=prompt('ダッシュボードトークン',token);if(t!==null){token=t;localStorage.setItem('toshi_token',t);refresh()}};
+refresh();setInterval(refresh,30000);
+</script>
+</body>
+</html>

@@ -28,6 +28,22 @@ CREATE TABLE IF NOT EXISTS equity (ts TEXT PRIMARY KEY, equity REAL, cash REAL);
 CREATE TABLE IF NOT EXISTS improvements (
   id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, date TEXT, param TEXT, old_value REAL, new_value REAL,
   rationale TEXT, status TEXT DEFAULT 'pending', decided_at TEXT, applied_from TEXT);
+-- 日足スイングのシグナル(毎晩)・ペーパー口座・ユーザーが実際に注文したかの記録
+CREATE TABLE IF NOT EXISTS swing_signals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, as_of TEXT, created_at TEXT, symbol TEXT, name TEXT, side TEXT,
+  shares INTEGER, est_price REAL, est_amount REAL, stop_price REAL, stop_pct REAL, reason TEXT,
+  status TEXT DEFAULT 'pending', fill_date TEXT, fill_price REAL, fill_shares INTEGER, note TEXT,
+  notified INTEGER DEFAULT 0,
+  user_action TEXT, user_price REAL, user_shares INTEGER, user_note TEXT, user_at TEXT);
+CREATE TABLE IF NOT EXISTS swing_positions (
+  symbol TEXT PRIMARY KEY, shares INTEGER, avg_price REAL, stop_pct REAL, stop_price REAL, entry_date TEXT,
+  last_price REAL);
+CREATE TABLE IF NOT EXISTS swing_trades (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, name TEXT, entry_date TEXT, exit_date TEXT, shares INTEGER,
+  entry_price REAL, exit_price REAL, pnl REAL, pnl_pct REAL, reason TEXT);
+CREATE TABLE IF NOT EXISTS swing_equity (date TEXT PRIMARY KEY, equity REAL, cash REAL);
+CREATE TABLE IF NOT EXISTS swing_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, as_of TEXT, n_signals INTEGER, notified TEXT, note TEXT);
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, summary TEXT, strategy TEXT, error TEXT);
 """

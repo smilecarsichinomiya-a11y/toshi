@@ -309,3 +309,184 @@ def test_premarket_picks_drive_watchlist(tmp_path):
     assert premarket.latest(e.db)["picks"][0]["symbol"] == "6758"
     # 未対応の戦略(NotImplementedError)は何もしない
     assert premarket.run(make_engine(Greedy(), "10:00"), "2026-01-05") is None
+
+
+# ---------------- 日足スイング(毎晩のシグナル通知) ----------------
+import numpy as np
+import pandas as pd
+
+from toshi import swing
+from toshi.signals import SignalService, format_notice
+
+
+def bars(n=140, breakout=True, drop_after=None, base=1000.0):
+    """上昇トレンドの日足。最終日に高値更新+出来高急増を作る(breakout=True)。"""
+    idx = pd.bdate_range(end="2026-01-09", periods=n)
+    close = base * (1 + 0.003) ** np.arange(n)  # 緩やかな上昇
+    close = close + np.sin(np.arange(n) / 3) * 3  # 小さな揺れ(高値を毎日は更新させない)
+    open_ = np.r_[close[0], close[:-1]]
+    high, low = close * 1.004, close * 0.996
+    vol = np.full(n, 1_000_000.0)
+    if breakout:
+        close[-1] = close[:-1].max() * 1.03
+        high[-1] = close[-1] * 1.003
+        vol[-1] = 2_500_000
+    df = pd.DataFrame({"Open": open_, "High": high, "Low": low, "Close": close, "Volume": vol}, index=idx)
+    if drop_after is not None:
+        df.iloc[drop_after:, df.columns.get_loc("Close")] *= 0.85
+    return df
+
+
+P = swing.Params(capital=500_000)
+
+
+def test_buy_signal_sizing_and_stop():
+    d = swing.prep(bars(), P)
+    rows = {"7203": swing.rowmap(d)[d.index[-1].strftime("%Y-%m-%d")]}
+    assert swing.buy_ok(rows["7203"], P)
+    sim = swing.Sim(P)
+    fills, sigs = sim.process_day(d.index[-1].strftime("%Y-%m-%d"), rows)
+    assert len(sigs) == 1 and sigs[0]["side"] == "buy"
+    s = sigs[0]
+    assert s["amount"] <= 0.25 * 500_000 and s["shares"] == int(125_000 // s["price"])  # 25%上限・株数は逆算
+    assert 0.03 <= s["stop_pct"] <= 0.08 and s["stop_price"] < s["price"]
+
+
+def test_no_signal_without_breakout():
+    d = swing.prep(bars(breakout=False), P)
+    assert not swing.buy_ok(swing.rowmap(d)[d.index[-1].strftime("%Y-%m-%d")], P)
+
+
+def test_max_positions_and_cash_cap():
+    """候補が6銘柄あっても、同時保有は4銘柄まで。1銘柄は資金の25%以内。"""
+    maps = {f"{1000 + i}": swing.rowmap(swing.prep(bars(base=1000 + 50 * i), P)) for i in range(6)}
+    last = sorted(next(iter(maps.values())))[-1]
+    sim = swing.Sim(P)
+    _, sigs = sim.process_day(last, {s: m[last] for s, m in maps.items()})
+    assert len([x for x in sigs if x["side"] == "buy"]) == 4
+    assert all(x["amount"] <= 125_000 for x in sigs)
+    # 翌日の始値で約定 → 保有4銘柄、さらに買いシグナルは出ない
+    nxt = {s: {**m[last], "Open": m[last]["Close"]} for s, m in maps.items()}
+    fills, sigs2 = sim.process_day("2026-01-12", nxt)
+    assert sum(f["filled"] for f in fills) == 4 and len(sim.positions) == 4
+    assert all(x["side"] != "buy" for x in sigs2)
+
+
+def test_stop_loss_and_exit_signal_and_pnl():
+    d = swing.prep(bars(), P)
+    m = swing.rowmap(d)
+    last = d.index[-1].strftime("%Y-%m-%d")
+    sim = swing.Sim(P)
+    sim.process_day(last, {"A": m[last]})
+    row = {**m[last], "Open": 1000.0, "ll": 500.0}
+    fills, sigs = sim.process_day("2026-01-12", {"A": {**row, "Close": 1000.0}})  # 約定(+コスト)
+    pos = sim.positions["A"]
+    assert abs(pos["avg"] - 1000 * 1.002) < 1e-6
+    crash = {**row, "Close": pos["stop"] * 0.99, "Open": pos["stop"] * 0.99}
+    _, sigs = sim.process_day("2026-01-13", {"A": crash})
+    assert [x["side"] for x in sigs] == ["sell"] and "損切り" in sigs[0]["reason"]
+    fills, _ = sim.process_day("2026-01-14", {"A": {**crash, "Open": crash["Close"]}})
+    assert not sim.positions and sim.trades[0]["pnl"] < 0
+
+
+def test_backtest_runs_and_reports():
+    res = swing.backtest({"7203": bars(n=600, breakout=False), "6758": bars(n=600, breakout=False, base=2000)}, P)
+    for w in ("1年", "2年"):
+        m = res["windows"][w]
+        assert {"trades", "win_rate", "max_dd_pct", "total_return_pct"} <= set(m)
+    rules = swing.describe_rules(P)
+    assert "25%" in " ".join(rules["size"]) and "4銘柄" in " ".join(rules["size"])
+
+
+class FakeNotifier:
+    def __init__(self, ok=True):
+        self.sent, self.ok = [], ok
+
+    def channels(self):
+        return ["メール"]
+
+    def send(self, subject, text):
+        self.sent.append((subject, text))
+        return [{"channel": "メール", "ok": self.ok, "error": "" if self.ok else "boom"}]
+
+
+class FixedData:
+    def __init__(self, frames):
+        self.frames = frames
+
+    def daily(self, symbol, years=3):
+        return self.frames.get(symbol)
+
+
+def svc_for(frames, clock="18:00", notifier=None, **kw):
+    c = cfg(None, **kw)
+    c.signal_universe = list(frames)
+    db = DB(":memory:")
+    return SignalService(c, db, FixedData(frames), notifier or FakeNotifier(), clock=at(clock)), db
+
+
+def test_service_nightly_run_notifies_and_is_idempotent():
+    n = FakeNotifier()
+    svc, db = svc_for({"7203": bars()}, notifier=n)
+    r = svc.run()
+    assert r["signals"] == 1 and len(n.sent) == 1
+    head, body = n.sent[0]
+    assert "トヨタ自動車(7203)" in body and "買い" in body and "損切り価格" in body and "概算" in body
+    row = db.query("SELECT * FROM swing_signals")[0]
+    assert row["status"] == "pending" and row["notified"] == 1 and row["user_action"] is None
+    assert svc.run()["skipped"] == "判定済み" and len(n.sent) == 1  # 二重通知しない
+
+
+def test_service_failed_notification_is_recorded_not_fatal():
+    svc, db = svc_for({"7203": bars()}, notifier=FakeNotifier(ok=False))
+    r = svc.run()
+    assert "NG" in r["notified"]
+    assert db.query("SELECT notified FROM swing_signals")[0]["notified"] == 0
+
+
+def test_service_catches_up_missed_days_and_fills_paper():
+    frames = {"7203": bars()}
+    svc, db = svc_for(frames)
+    svc.run()  # 1/9 の買いシグナル
+    nxt = frames["7203"].copy()
+    nxt.loc[pd.Timestamp("2026-01-12")] = [1500.0, 1520.0, 1490.0, 1510.0, 1_000_000.0]
+    nxt.loc[pd.Timestamp("2026-01-13")] = [1510.0, 1530.0, 1500.0, 1520.0, 1_000_000.0]
+    svc.data = FixedData({"7203": nxt})
+    svc.clock = at("18:00")
+    svc.run(notify=False)
+    sig = db.query("SELECT * FROM swing_signals ORDER BY id")[0]
+    assert sig["status"] == "filled" and sig["fill_date"] == "2026-01-12" and abs(sig["fill_price"] - 1503.0) < 1e-6
+    assert db.query("SELECT COUNT(*) n FROM swing_positions")[0]["n"] == 1
+    assert db.query("SELECT COUNT(*) n FROM swing_equity")[0]["n"] >= 2
+
+
+def test_service_ignores_unfinished_today_bar():
+    frames = {"7203": bars()}
+    svc, db = svc_for(frames, clock="10:00")  # 場中: 1/9 の足が当日分なら使わない
+    svc.clock = at("10:00")
+    assert svc.run()["as_of"] <= "2026-01-09"
+
+
+def test_signal_api_and_user_action(tmp_path):
+    e = make_engine(Greedy(), "18:00", tmp_path)
+    svc, _ = svc_for({"7203": bars()})
+    svc.db = e.db
+    svc.run()
+    cl = TestClient(create_app(e, svc))
+    sigs = cl.get("/api/swing/signals").json()
+    assert sigs[0]["symbol"] == "7203" and sigs[0]["user_action"] is None
+    r = cl.post(f"/api/swing/signals/{sigs[0]['id']}/action", json={"action": "ordered", "price": 1234.5, "shares": 5})
+    assert r.status_code == 200
+    s2 = cl.get("/api/swing/signals").json()[0]
+    assert s2["user_action"] == "ordered" and s2["user_price"] == 1234.5 and s2["user_shares"] == 5
+    assert cl.post(f"/api/swing/signals/{s2['id']}/action", json={"action": "bogus"}).status_code == 422
+    summ = cl.get("/api/swing/summary").json()
+    assert summ["mode"] == "paper" and summ["adherence"]["ordered"] == 1
+    assert "buy" in cl.get("/api/swing/rules").json()["rules"]
+
+
+def test_format_notice_contents():
+    head, body = format_notice("2026-01-09", [
+        dict(symbol="7203", side="buy", shares=7, amount=125_000.0, stop_price=1700, stop_pct=0.05, reason="r1"),
+        dict(symbol="6758", side="sell", shares=3, amount=30_000.0, stop_price=None, stop_pct=None, reason="r2")], 500_000)
+    assert "売り1件・買い1件" in head and "ソニーグループ(6758)" in body and "損切り価格 1,700円" in body
