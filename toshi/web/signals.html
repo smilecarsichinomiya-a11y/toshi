@@ -128,7 +128,7 @@ async function refresh(){
     const ch=s.channels.length?`<span class="ok">通知先: ${s.channels.join('・')}</span>`:'<span class="err">通知先が未設定です。.env にメールまたは LINE の設定を入れてください(README の「通知の設定」)。</span>';
     $('#status').innerHTML=`平日 ${esc(s.signal_at)} 以降に、日足でシグナルを判定します(パソコンを起動しておいてください)。 ${ch}`+
       (s.last_run?`<div class="mut">前回: ${esc(s.last_run.ts)} / ${esc(s.last_run.note||'')} / 通知 ${esc(s.last_run.notified||'-')}</div>`:'')+
-      (s.running?'<div>判定中…</div>':'')+(s.last_error?`<div class="err">⚠ ${esc(s.last_error)}</div>`:'');
+      `<div class="mut">対象 ${s.universe}銘柄`+(s.mini_only?`(楽天証券かぶミニ対象のみ。一覧は${esc(s.mini_as_of)}時点。注文前に対象か確認してください`+(s.excluded.length?`。対象外のため除外: ${s.excluded.map(esc).join('、')}`:'')+')':'')+'</div>'+(s.running?'<div>判定中…</div>':'')+(s.last_error?`<div class="err">⚠ ${esc(s.last_error)}</div>`:'');
     const latest=sigs.length?sigs[0].as_of:null,lt=sigs.filter(r=>r.as_of===latest);
     $('#latestdate').textContent=latest?`(${latest} の引け後に判定)`:'';
     if(lt.length){$('#latest').className='';$('#latest').innerHTML='<table id="lt"></table>';table($('#lt'),COLS.slice(1),lt)}

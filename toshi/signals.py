@@ -11,7 +11,7 @@ import pandas as pd
 from . import swing
 from .db import DB, now
 from .notify import Notifier
-from .universe import name_of
+from .universe import MINI_AS_OF, name_of
 
 log = logging.getLogger("toshi.signals")
 BACKTEST_MAX_AGE_DAYS = 7
@@ -40,6 +40,8 @@ def format_notice(as_of: str, sigs: list[dict], capital: float) -> tuple[str, st
         lines.append("本日の売買シグナルはありません。")
         lines.append("")
     lines.append("※投資判断と注文は自己責任です。注文したか見送ったかは、ダッシュボードに記録してください。")
+    if MINI_AS_OF:
+        lines.append(f"※かぶミニ対象銘柄は{MINI_AS_OF}時点の一覧で絞っています。注文前に、対象かどうかをご確認ください。")
     head = f"【toshi】{as_of} 売り{len(sells)}件・買い{len(buys)}件" if sigs else f"【toshi】{as_of} シグナルなし"
     return head, "\n".join(lines)
 

@@ -13,6 +13,7 @@ from typing import Literal
 from .. import analytics, premarket, swing
 from ..engine import Engine, market_open
 from ..signals import SignalService
+from ..universe import MINI_AS_OF
 
 HERE = os.path.dirname(__file__)
 
@@ -63,7 +64,8 @@ def create_app(engine: Engine, svc: SignalService | None = None) -> FastAPI:
             "last_date": db.get("swing_last_date"), "signal_at": cfg.signal_at,
             "pos_pct": cfg.signal_pos_pct, "max_positions": cfg.signal_max_positions,
             "channels": svc.notifier.channels(), "last_error": svc.last_error, "running": svc.running,
-            "bt_running": svc.bt_running, "universe": len(cfg.signal_universe),
+            "bt_running": svc.bt_running, "universe": len(cfg.signal_universe), "mini_only": cfg.mini_only,
+            "mini_as_of": MINI_AS_OF, "excluded": [f"{swing_name(c)}({c})" for c in cfg.signal_excluded],
             "adherence": {"ordered": ua.get("ordered", 0), "skipped": ua.get("skipped", 0), "open": ua.get(None, 0)},
             "last_run": (db.query("SELECT * FROM swing_runs ORDER BY id DESC LIMIT 1") or [None])[0],
         }

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from .universe import SIGNAL_UNIVERSE
+from .universe import SIGNAL_UNIVERSE, filter_mini
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -39,6 +39,8 @@ class Config:
     mode: str = "signals"
     signal_at: str = "18:00"  # 毎営業日、この時刻以降にシグナルを判定する
     signal_universe: list[str] = field(default_factory=list)
+    mini_only: bool = True  # 楽天証券かぶミニ®の取扱銘柄だけを対象にする
+    signal_excluded: list[str] = field(default_factory=list)  # かぶミニ対象外で除いた銘柄
     signal_pos_pct: float = 0.25  # 1銘柄の上限(総資産に対する割合)
     signal_max_positions: int = 4
     signal_cost_pct: float = 0.002  # 片道のコスト(スプレッド等)の仮定
@@ -92,10 +94,17 @@ def load_config() -> Config:
     _load_dotenv()
     uni = _s("TOSHI_UNIVERSE", DEFAULT_UNIVERSE)
     sig = _s("TOSHI_SIGNAL_UNIVERSE", "")
+    mini_only = _s("TOSHI_MINI_ONLY", "yes").lower() == "yes"
+    universe = [u.strip() for u in sig.split(",") if u.strip()] or list(SIGNAL_UNIVERSE)
+    excluded: list[str] = []
+    if mini_only:
+        universe, excluded = filter_mini(universe)
     cfg = Config(
         mode=_s("TOSHI_MODE", "signals"),
         signal_at=_s("TOSHI_SIGNAL_AT", "18:00"),
-        signal_universe=[u.strip() for u in sig.split(",") if u.strip()] or list(SIGNAL_UNIVERSE),
+        signal_universe=universe,
+        mini_only=mini_only,
+        signal_excluded=excluded,
         signal_pos_pct=_f("TOSHI_SIGNAL_POS_PCT", 0.25),
         signal_max_positions=_i("TOSHI_SIGNAL_MAX_POSITIONS", 4),
         signal_cost_pct=_f("TOSHI_SIGNAL_COST_PCT", 0.002),

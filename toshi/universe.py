@@ -1,6 +1,9 @@
 """シグナル判定の対象銘柄(売買代金が大きい大型株)。名前は通知・表示用の目安。"""
 from __future__ import annotations
 
+import json
+import os
+
 NAMES = {
     "1605": "INPEX", "1925": "大和ハウス工業", "2802": "味の素", "2914": "JT",
     "3382": "セブン&アイ・ホールディングス", "4063": "信越化学工業", "4502": "武田薬品工業", "4519": "中外製薬",
@@ -24,3 +27,27 @@ SIGNAL_UNIVERSE = [c for c in NAMES if c != "1306"]
 
 def name_of(code: str) -> str:
     return NAMES.get(code, code)
+
+
+# --- 楽天証券「かぶミニ®」(単元未満株)の取扱銘柄。1株から売買できるのはこの一覧の銘柄だけ ---
+_MINI_PATH = os.path.join(os.path.dirname(__file__), "kabumini.json")
+try:
+    with open(_MINI_PATH, encoding="utf-8") as _f:
+        _MINI = json.load(_f)
+except (OSError, ValueError):
+    _MINI = {"as_of": "", "stocks": {}}
+MINI_AS_OF: str = _MINI.get("as_of", "")
+
+
+def mini_info(code: str) -> dict | None:
+    """{"open": 寄付取引の可否, "realtime": リアルタイム取引の可否}。かぶミニ対象外なら None。"""
+    v = _MINI["stocks"].get(code)
+    return {"open": bool(v[0]), "realtime": bool(v[1])} if v else None
+
+
+def filter_mini(codes: list[str]) -> tuple[list[str], list[str]]:
+    """(かぶミニ対象の銘柄, 対象外の銘柄)。一覧ファイルが読めないときは絞り込まない。"""
+    if not _MINI["stocks"]:
+        return list(codes), []
+    ok = [c for c in codes if c in _MINI["stocks"]]
+    return ok, [c for c in codes if c not in _MINI["stocks"]]

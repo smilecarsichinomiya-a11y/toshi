@@ -490,3 +490,21 @@ def test_format_notice_contents():
         dict(symbol="7203", side="buy", shares=7, amount=125_000.0, stop_price=1700, stop_pct=0.05, reason="r1"),
         dict(symbol="6758", side="sell", shares=3, amount=30_000.0, stop_price=None, stop_pct=None, reason="r2")], 500_000)
     assert "売り1件・買い1件" in head and "ソニーグループ(6758)" in body and "損切り価格 1,700円" in body
+
+
+def test_kabumini_universe_filter(tmp_path, monkeypatch):
+    """かぶミニ対象外の銘柄(楽天G・野村HD)は自動で除外。対象銘柄はリアルタイム取引も可。"""
+    from toshi import universe
+    from toshi.config import load_config
+
+    assert universe.mini_info("7203") == {"open": True, "realtime": True}
+    assert universe.mini_info("4755") is None and universe.mini_info("8604") is None
+    assert universe.filter_mini(["7203", "4755"]) == (["7203"], ["4755"])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TOSHI_SIGNAL_UNIVERSE", raising=False)
+    monkeypatch.delenv("TOSHI_MINI_ONLY", raising=False)
+    c = load_config()
+    assert "7203" in c.signal_universe and "4755" not in c.signal_universe and "8604" not in c.signal_universe
+    assert set(c.signal_excluded) == {"4755", "8604"} and len(c.signal_universe) == 56
+    monkeypatch.setenv("TOSHI_MINI_ONLY", "no")
+    assert len(load_config().signal_universe) == 58
