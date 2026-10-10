@@ -319,10 +319,10 @@ from toshi import swing
 from toshi.signals import SignalService, format_notice
 
 
-def bars(n=140, breakout=True, drop_after=None, base=1000.0):
+def bars(n=140, breakout=True, drop_after=None, base=1000.0, growth=0.003):
     """上昇トレンドの日足。最終日に高値更新+出来高急増を作る(breakout=True)。"""
     idx = pd.bdate_range(end="2026-01-09", periods=n)
-    close = base * (1 + 0.003) ** np.arange(n)  # 緩やかな上昇
+    close = base * (1 + growth) ** np.arange(n)  # 緩やかな上昇
     close = close + np.sin(np.arange(n) / 3) * 3  # 小さな揺れ(高値を毎日は更新させない)
     open_ = np.r_[close[0], close[:-1]]
     high, low = close * 1.004, close * 0.996
@@ -348,7 +348,7 @@ def test_buy_signal_sizing_and_stop():
     fills, sigs = sim.process_day(d.index[-1].strftime("%Y-%m-%d"), rows)
     assert len(sigs) == 1 and sigs[0]["side"] == "buy"
     s = sigs[0]
-    assert s["amount"] <= 0.25 * 500_000 and s["shares"] == int(125_000 // s["price"])  # 25%上限・株数は逆算
+    assert s["amount"] <= 0.20 * 500_000 and s["shares"] == int(100_000 // s["price"])  # 20%上限・株数は逆算
     assert 0.03 <= s["stop_pct"] <= 0.08 and s["stop_price"] < s["price"]
 
 
@@ -358,17 +358,17 @@ def test_no_signal_without_breakout():
 
 
 def test_max_positions_and_cash_cap():
-    """候補が6銘柄あっても、同時保有は4銘柄まで。1銘柄は資金の25%以内。"""
-    maps = {f"{1000 + i}": swing.rowmap(swing.prep(bars(base=1000 + 50 * i), P)) for i in range(6)}
+    """候補が7銘柄あっても、同時保有は5銘柄まで。1銘柄は資金の20%以内。"""
+    maps = {f"{1000 + i}": swing.rowmap(swing.prep(bars(base=1000 + 50 * i), P)) for i in range(7)}
     last = sorted(next(iter(maps.values())))[-1]
     sim = swing.Sim(P)
     _, sigs = sim.process_day(last, {s: m[last] for s, m in maps.items()})
-    assert len([x for x in sigs if x["side"] == "buy"]) == 4
-    assert all(x["amount"] <= 125_000 for x in sigs)
-    # 翌日の始値で約定 → 保有4銘柄、さらに買いシグナルは出ない
+    assert len([x for x in sigs if x["side"] == "buy"]) == 5
+    assert all(x["amount"] <= 100_000 for x in sigs)
+    # 翌日の始値で約定 → 保有5銘柄、さらに買いシグナルは出ない
     nxt = {s: {**m[last], "Open": m[last]["Close"]} for s, m in maps.items()}
     fills, sigs2 = sim.process_day("2026-01-12", nxt)
-    assert sum(f["filled"] for f in fills) == 4 and len(sim.positions) == 4
+    assert sum(f["filled"] for f in fills) == 5 and len(sim.positions) == 5
     assert all(x["side"] != "buy" for x in sigs2)
 
 
@@ -395,7 +395,7 @@ def test_backtest_runs_and_reports():
         m = res["windows"][w]
         assert {"trades", "win_rate", "max_dd_pct", "total_return_pct"} <= set(m)
     rules = swing.describe_rules(P)
-    assert "25%" in " ".join(rules["size"]) and "4銘柄" in " ".join(rules["size"])
+    assert "20%" in " ".join(rules["size"]) and "5銘柄" in " ".join(rules["size"]) and rules["pullback"]
 
 
 class FakeNotifier:
@@ -417,10 +417,14 @@ class FixedData:
     def daily(self, symbol, years=3):
         return self.frames.get(symbol)
 
+    def daily_many(self, symbols, years=3):
+        return {s: self.frames[s] for s in symbols if s in self.frames}
+
 
 def svc_for(frames, clock="18:00", notifier=None, **kw):
     c = cfg(None, **kw)
     c.signal_universe = list(frames)
+    c.universe_mode = "fixed"
     db = DB(":memory:")
     return SignalService(c, db, FixedData(frames), notifier or FakeNotifier(), clock=at(clock)), db
 
@@ -508,3 +512,117 @@ def test_kabumini_universe_filter(tmp_path, monkeypatch):
     assert set(c.signal_excluded) == {"4755", "8604"} and len(c.signal_universe) == 56
     monkeypatch.setenv("TOSHI_MINI_ONLY", "no")
     assert len(load_config().signal_universe) == 58
+
+
+# ---------------- 押し目買い(短期)・銘柄の自動選定・まとめ取得・DB移行 ----------------
+def pullback_bars(n=140, base=1000.0):
+    """上昇トレンド中に、直近5日の高値から5%下げて、最終日だけ反発する日足。"""
+    df = bars(n, breakout=False, base=base, growth=0.01)
+    close = df["Close"].to_numpy().copy()
+    top = close[-6]
+    for i, f in enumerate([0.99, 0.97, 0.95, 0.94]):  # 直近高値から段階的に下落
+        close[-5 + i] = top * f
+    close[-1] = top * 0.955  # 前日(0.94)より反発、高値から4.5%安
+    df["Close"] = close
+    df["High"] = np.maximum(df["High"].to_numpy(), close * 1.001)
+    df.iloc[-6, df.columns.get_loc("High")] = top * 1.002
+    df["Low"] = np.minimum(df["Low"].to_numpy(), close * 0.999)
+    return df
+
+
+def test_pullback_signal_and_exits():
+    d = swing.prep(pullback_bars(), P)
+    last = d.index[-1].strftime("%Y-%m-%d")
+    r = swing.rowmap(d)[last]
+    assert swing.pullback_ok(r, P) and not swing.breakout_ok(r, P)
+    sim = swing.Sim(P)
+    _, sigs = sim.process_day(last, {"A": r})
+    s = sigs[0]
+    assert s["strategy"] == "pullback" and s["target"] and 0.02 <= s["stop_pct"] <= 0.05
+    # 約定後、押し目前の高値まで戻れば利益確定のシグナル
+    base = {**r, "ll": 1.0, "Open": 1000.0, "Close": 1000.0}
+    sim.process_day("2026-01-12", {"A": base})
+    pos = sim.positions["A"]
+    assert pos["strategy"] == "pullback" and pos["days"] == 0
+    _, sigs = sim.process_day("2026-01-13", {"A": {**base, "Close": pos["target"] * 1.001, "Open": 1000.0}})
+    assert sigs and sigs[0]["side"] == "sell" and "利益確定" in sigs[0]["reason"]
+
+
+def test_pullback_time_stop_and_slot_cap():
+    p = swing.Params(capital=1_000_000, pb_max_hold=3)
+    sim = swing.Sim(p)
+    row = {"Open": 1000.0, "High": 1010.0, "Low": 990.0, "Close": 1000.0, "Volume": 1e6, "sma25": 950.0, "sma75": 900.0,
+           "hh": 2000.0, "ll": 1.0, "vavg": 1e6, "atr": 10.0, "roc60": 0.1, "high5": 1100.0, "prev_close": 990.0,
+           "tov20": 1e9}
+    # 押し目の候補が4銘柄 → 押し目は最大2銘柄まで
+    _, sigs = sim.process_day("2026-01-05", {f"P{i}": dict(row) for i in range(4)})
+    assert len([x for x in sigs if x["side"] == "buy"]) == 2
+    sim.process_day("2026-01-06", {f"P{i}": {**row, "Close": 1000.0, "high5": 1e9} for i in range(4)})
+    for d in ("2026-01-07", "2026-01-08", "2026-01-09"):
+        _, sigs = sim.process_day(d, {f"P{i}": {**row, "high5": 1e9} for i in range(4)})
+    assert any(x["side"] == "sell" and "時間切れ" in x["reason"] for x in sigs)
+
+
+def test_vector_conditions_match_row_conditions():
+    for df in (bars(), bars(breakout=False), pullback_bars()):
+        d = swing.prep(df, P)
+        vb, vp = swing.breakout_vec(d, P), swing.pullback_vec(d, P)
+        rows = swing.rowmap(d)
+        for i, (ts_, _) in enumerate(d.iterrows()):
+            r = rows[ts_.strftime("%Y-%m-%d")]
+            assert bool(vb.iloc[i]) == swing.breakout_ok(r, P) and bool(vp.iloc[i]) == swing.pullback_ok(r, P)
+
+
+def test_market_topn_picks_most_liquid():
+    """売買代金の上位だけが新規の買い候補。保有中の銘柄は順位に関係なく行を返す。"""
+    frames = {f"{1000 + i}": bars(base=1000 + 10 * i) for i in range(4)}
+    for i, (s, df) in enumerate(frames.items()):
+        df["Volume"] = df["Volume"] * (i + 1)  # 後ろの銘柄ほど売買代金が大きい
+    p = swing.Params(capital=500_000, topn=2)
+    mk = swing.Market(frames, p)
+    last = mk.dates[-1]
+    assert set(mk.cand[last]) <= {"1002", "1003"} and mk.cand[last]
+    assert "1000" in mk.rows_for(last, {"1000"}) and "1001" not in mk.rows_for(last, set())
+
+
+def test_yfinance_batch_download_parsing(monkeypatch):
+    import yfinance
+    from toshi.data import YFinanceProvider
+
+    idx = pd.bdate_range(end="2026-01-09", periods=5, tz="Asia/Tokyo")
+    parts = {f"{c}.T": pd.DataFrame({"Open": 1.0, "High": 2.0, "Low": 0.5, "Close": 1.5, "Volume": 100.0}, index=idx)
+             for c in ("7203", "6758")}
+    raw = pd.concat(parts, axis=1)  # 列が (銘柄, 項目) の MultiIndex
+    calls = []
+    monkeypatch.setattr(yfinance, "download", lambda tickers, **kw: calls.append(tickers) or raw)
+    out = YFinanceProvider().daily_many(["7203", "6758", "9999"], 3)
+    assert set(out) == {"7203", "6758"} and len(calls) == 1  # 100銘柄ずつ1回で取得、取得できない銘柄は除外
+    assert out["7203"].index.tz is None and out["7203"].index[-1] == pd.Timestamp("2026-01-09")
+
+
+def test_db_migration_adds_columns_to_old_database(tmp_path):
+    import sqlite3
+
+    path = str(tmp_path / "old.db")
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE swing_positions (symbol TEXT PRIMARY KEY, shares INTEGER, avg_price REAL, stop_pct REAL,"
+              " stop_price REAL, entry_date TEXT, last_price REAL)")
+    c.execute("INSERT INTO swing_positions VALUES('7203',3,1000,0.05,950,'2026-01-05',1010)")
+    c.commit()
+    c.close()
+    db = DB(path)
+    row = db.query("SELECT * FROM swing_positions")[0]
+    assert row["symbol"] == "7203" and "strategy" in row and "days" in row
+
+
+def test_liquid_pool_includes_held_and_runs_end_to_end():
+    from toshi.universe import pool_realtime
+
+    frames = {s: bars(base=1000 + i) for i, s in enumerate(pool_realtime()[:12])}
+    svc, db = svc_for(frames)
+    svc.cfg.universe_mode = "liquid"
+    svc.p = swing.Params.from_cfg(svc.cfg)
+    db.execute("INSERT INTO swing_positions(symbol,shares,avg_price,stop_pct,stop_price,entry_date,strategy,days)"
+               " VALUES('9999',1,100,0.05,95,'2026-01-05','breakout',0)")
+    assert "9999" in svc.pool() and len(svc.pool()) > 500  # かぶミニのリアルタイム対象 + 保有中の銘柄
+    assert svc.run()["as_of"] == "2026-01-09"

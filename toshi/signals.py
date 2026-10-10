@@ -4,14 +4,13 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
 from . import swing
 from .db import DB, now
 from .notify import Notifier
-from .universe import MINI_AS_OF, name_of
+from .universe import MINI_AS_OF, name_of, pool_realtime
 
 log = logging.getLogger("toshi.signals")
 BACKTEST_MAX_AGE_DAYS = 7
@@ -23,18 +22,21 @@ def format_notice(as_of: str, sigs: list[dict], capital: float) -> tuple[str, st
     buys = [s for s in sigs if s["side"] == "buy"]
     lines = [f"{as_of} の引け後に判定したシグナルです(ペーパートレード)。",
              "翌営業日の寄り付きで注文する想定です。株数・金額は終値で計算した目安です。", ""]
+    tag = lambda s: f" [{swing.STRATEGY_LABEL.get(s.get('strategy') or 'breakout')}]"  # noqa: E731
     if sells:
         lines.append("■ 売り")
         for s in sells:
-            lines += [f"・{name_of(s['symbol'])}({s['symbol']}) 売り {s['shares']:,}株 概算 {s['amount']:,.0f}円",
+            lines += [f"・{name_of(s['symbol'])}({s['symbol']}) 売り {s['shares']:,}株 概算 {s['amount']:,.0f}円{tag(s)}",
                       f"  理由: {s['reason']}"]
         lines.append("")
     if buys:
         lines.append("■ 買い")
         for s in buys:
-            lines += [f"・{name_of(s['symbol'])}({s['symbol']}) 買い {s['shares']:,}株 概算 {s['amount']:,.0f}円",
-                      f"  損切り価格 {s['stop_price']:,.0f}円(買値の約-{s['stop_pct'] * 100:.1f}%)",
-                      f"  理由: {s['reason']}"]
+            lines += [f"・{name_of(s['symbol'])}({s['symbol']}) 買い {s['shares']:,}株 概算 {s['amount']:,.0f}円{tag(s)}",
+                      f"  損切り価格 {s['stop_price']:,.0f}円(買値の約-{s['stop_pct'] * 100:.1f}%)"]
+            if s.get("target"):
+                lines.append(f"  利益確定の目安 {s['target']:,.0f}円(押し目前の高値)。戻らなければ約10営業日で売り")
+            lines.append(f"  理由: {s['reason']}")
         lines.append("")
     if not sigs:
         lines.append("本日の売買シグナルはありません。")
@@ -65,19 +67,20 @@ class SignalService:
             df = df[df.index < pd.Timestamp(t.strftime("%Y-%m-%d"))]
         return df
 
-    def _fetch(self, symbols: list[str]) -> tuple[dict[str, pd.DataFrame], list[str]]:
-        def one(s):
-            try:
-                return s, self.data.daily(s, 3)
-            except Exception as e:  # noqa: BLE001
-                log.warning("daily %s failed: %s", s, e)
-                return s, None
+    def pool(self) -> list[str]:
+        """データを取得する銘柄。liquid: かぶミニのリアルタイム対象(売買代金の上位は Market が毎日選ぶ) / fixed: 固定リスト。
+        保有中・注文中の銘柄は、対象から外れても必ず含める(売り判定のため)。"""
+        base = pool_realtime() if self.cfg.universe_mode == "liquid" else []
+        base = base or list(self.cfg.signal_universe)
+        held = {r["symbol"] for r in self.db.query("SELECT symbol FROM swing_positions")}
+        held |= {r["symbol"] for r in self.db.query("SELECT symbol FROM swing_signals WHERE status='pending'")}
+        return sorted(set(base) | held)
 
-        with ThreadPoolExecutor(max_workers=6) as ex:
-            res = list(ex.map(one, symbols))
+    def _fetch(self, symbols: list[str]) -> tuple[dict[str, pd.DataFrame], list[str]]:
+        got = self.data.daily_many(symbols, 3)
         ok, failed = {}, []
-        for s, df in res:
-            df = self._completed(df) if df is not None else None
+        for s in symbols:
+            df = self._completed(got[s]) if s in got and got[s] is not None else None
             if df is None or len(df) < 80:
                 failed.append(s)
             else:
@@ -89,11 +92,13 @@ class SignalService:
         db = self.db
         cash = db.get("swing_cash")
         pos = {r["symbol"]: dict(shares=r["shares"], avg=r["avg_price"], stop_pct=r["stop_pct"],
-                                 stop=r["stop_price"], entry_date=r["entry_date"])
+                                 stop=r["stop_price"], entry_date=r["entry_date"],
+                                 strategy=r["strategy"] or "breakout", target=r["target"], days=r["days"] or 0)
                for r in db.query("SELECT * FROM swing_positions")}
         last = {r["symbol"]: r["last_price"] for r in db.query("SELECT * FROM swing_positions") if r["last_price"]}
         pend = [dict(symbol=r["symbol"], side=r["side"], shares=r["shares"], stop_pct=r["stop_pct"],
-                     reason=r["reason"], sid=r["id"], signal_date=r["as_of"], price=r["est_price"])
+                     reason=r["reason"], sid=r["id"], signal_date=r["as_of"], price=r["est_price"],
+                     strategy=r["strategy"] or "breakout", target=r["target"])
                 for r in db.query("SELECT * FROM swing_signals WHERE status='pending' ORDER BY id")]
         return swing.Sim(self.p, cash=float(cash) if cash is not None else None, positions=pos, pending=pend,
                          last_close=last)
@@ -109,20 +114,22 @@ class SignalService:
                            (f["fill_date"], f.get("note", ""), f["sid"]))
         for t in sim.trades[n_trades_before:]:
             db.execute("INSERT INTO swing_trades(symbol,name,entry_date,exit_date,shares,entry_price,exit_price,pnl,"
-                       "pnl_pct,reason) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                       "pnl_pct,reason,strategy) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                        (t["symbol"], name_of(t["symbol"]), t["entry_date"], t["exit_date"], t["shares"],
-                        t["entry_price"], t["exit_price"], t["pnl"], t["pnl_pct"], t["reason"]))
+                        t["entry_price"], t["exit_price"], t["pnl"], t["pnl_pct"], t["reason"], t["strategy"]))
         for s in sigs:
             s["sid"] = db.execute(
                 "INSERT INTO swing_signals(as_of,created_at,symbol,name,side,shares,est_price,est_amount,stop_price,"
-                "stop_pct,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "stop_pct,reason,strategy,target) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (date, self.clock().strftime("%Y-%m-%d %H:%M:%S"), s["symbol"], name_of(s["symbol"]), s["side"],
-                 s["shares"], s["price"], s["amount"], s["stop_price"], s["stop_pct"], s["reason"]))
+                 s["shares"], s["price"], s["amount"], s["stop_price"], s["stop_pct"], s["reason"],
+                 s.get("strategy"), s.get("target")))
         db.execute("DELETE FROM swing_positions")
         for sym, x in sim.positions.items():
-            db.execute("INSERT INTO swing_positions VALUES(?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO swing_positions(symbol,shares,avg_price,stop_pct,stop_price,entry_date,last_price,"
+                       "strategy,target,days) VALUES(?,?,?,?,?,?,?,?,?,?)",
                        (sym, x["shares"], x["avg"], x["stop_pct"], x["stop"], x["entry_date"],
-                        sim.last_close.get(sym)))
+                        sim.last_close.get(sym), x["strategy"], x.get("target"), x.get("days") or 0))
         _, eq, cash = sim.curve[-1]
         db.execute("INSERT OR REPLACE INTO swing_equity VALUES(?,?,?)", (date, eq, cash))
         db.set("swing_cash", str(sim.cash))
@@ -135,20 +142,20 @@ class SignalService:
             return {"skipped": "実行中"}
         self.running = True
         try:
-            raw, failed = self._fetch(self.cfg.signal_universe)
+            raw, failed = self._fetch(self.pool())
             if not raw:
                 raise RuntimeError("株価データを取得できませんでした(ネット接続を確認してください)")
-            maps = {s: swing.rowmap(swing.prep(df, self.p)) for s, df in raw.items()}
-            dates = sorted({d for m in maps.values() for d in m})
+            mk = swing.Market(raw, self.p)
+            dates = mk.dates
             last, done = dates[-1], self.db.get("swing_last_date")
             if done == last:
-                return {"as_of": last, "skipped": "判定済み", "failed": failed}
+                return {"as_of": last, "skipped": "判定済み", "failed": len(failed)}
             sim = self._load_sim()
             todo = [d for d in dates if done is None or d > done] if done else [last]
             final: list[dict] = []
             for d in todo:  # 停止していた日があれば、1日ずつ順番に追いつく
                 n_before = len(sim.trades)
-                fills, sigs = sim.process_day(d, {s: m[d] for s, m in maps.items() if d in m})
+                fills, sigs = sim.process_day(d, mk.rows_for(d, sim.need()))
                 self._save_day(sim, d, fills, sigs, n_before)
                 final = sigs
             sent = ""
@@ -160,11 +167,12 @@ class SignalService:
                 if res and all(r["ok"] for r in res):
                     for s in final:
                         self.db.execute("UPDATE swing_signals SET notified=1 WHERE id=?", (s["sid"],))
-            note = f"{len(todo)}日分を判定" + (f" / 取得失敗: {','.join(failed)}" if failed else "")
+            note = f"{len(todo)}日分を判定 / {len(raw)}銘柄のデータを使用" + (f"(取得失敗・履歴不足 {len(failed)}銘柄)" if failed else "")
+            self.db.set("swing_universe_info", json.dumps({"loaded": len(raw), "failed": len(failed), "as_of": last}))
             self.db.execute("INSERT INTO swing_runs(ts,as_of,n_signals,notified,note) VALUES(?,?,?,?,?)",
                             (self.clock().strftime("%Y-%m-%d %H:%M:%S"), last, len(final), sent, note))
             self.last_error = ""
-            return {"as_of": last, "signals": len(final), "notified": sent, "failed": failed}
+            return {"as_of": last, "signals": len(final), "notified": sent, "failed": len(failed)}
         except Exception as e:  # noqa: BLE001
             log.exception("signal run failed")
             self.last_error = str(e)
@@ -180,14 +188,16 @@ class SignalService:
 
     # --- バックテスト ---
     def backtest_key(self) -> str:
-        return self.p.key() + "|" + ",".join(self.cfg.signal_universe)
+        pool = f"{self.cfg.universe_mode}:{len(pool_realtime())}" if self.cfg.universe_mode == "liquid" \
+            else ",".join(self.cfg.signal_universe)
+        return self.p.key() + "|" + pool
 
     def backtest(self) -> dict | None:
         if self.bt_running:
             return None
         self.bt_running = True
         try:
-            raw, failed = self._fetch(self.cfg.signal_universe)
+            raw, failed = self._fetch(self.pool())
             if not raw:
                 raise RuntimeError("株価データを取得できませんでした")
             bench = None
@@ -196,7 +206,7 @@ class SignalService:
             except Exception:  # noqa: BLE001
                 pass
             res = swing.backtest(raw, self.p, bench=bench)
-            res |= {"key": self.backtest_key(), "ts": self.clock().strftime("%Y-%m-%d %H:%M"), "failed": failed}
+            res |= {"key": self.backtest_key(), "ts": self.clock().strftime("%Y-%m-%d %H:%M"), "failed": len(failed)}
             self.db.set("swing_backtest", json.dumps(res, ensure_ascii=False))
             return res
         except Exception as e:  # noqa: BLE001

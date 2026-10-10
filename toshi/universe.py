@@ -26,7 +26,11 @@ SIGNAL_UNIVERSE = [c for c in NAMES if c != "1306"]
 
 
 def name_of(code: str) -> str:
-    return NAMES.get(code, code)
+    """表示用の銘柄名。主要銘柄は NAMES、それ以外はかぶミニ一覧の名前、無ければコード。"""
+    if code in NAMES:
+        return NAMES[code]
+    v = _MINI["stocks"].get(code)
+    return v[2] if v and len(v) > 2 else code
 
 
 # --- 楽天証券「かぶミニ®」(単元未満株)の取扱銘柄。1株から売買できるのはこの一覧の銘柄だけ ---
@@ -51,3 +55,8 @@ def filter_mini(codes: list[str]) -> tuple[list[str], list[str]]:
         return list(codes), []
     ok = [c for c in codes if c in _MINI["stocks"]]
     return ok, [c for c in codes if c not in _MINI["stocks"]]
+
+
+def pool_realtime() -> list[str]:
+    """リアルタイム取引ができるかぶミニ銘柄(売買しやすい銘柄の母集団)。一覧が読めなければ空。"""
+    return [c for c, v in _MINI["stocks"].items() if v[1]]

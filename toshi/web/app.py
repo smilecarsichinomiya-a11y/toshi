@@ -65,6 +65,8 @@ def create_app(engine: Engine, svc: SignalService | None = None) -> FastAPI:
             "pos_pct": cfg.signal_pos_pct, "max_positions": cfg.signal_max_positions,
             "channels": svc.notifier.channels(), "last_error": svc.last_error, "running": svc.running,
             "bt_running": svc.bt_running, "universe": len(cfg.signal_universe), "mini_only": cfg.mini_only,
+            "universe_mode": cfg.universe_mode, "topn": cfg.signal_topn if cfg.universe_mode == "liquid" else 0,
+            "pullback": cfg.signal_pullback, "loaded": json.loads(db.get("swing_universe_info") or "{}"),
             "mini_as_of": MINI_AS_OF, "excluded": [f"{swing_name(c)}({c})" for c in cfg.signal_excluded],
             "adherence": {"ordered": ua.get("ordered", 0), "skipped": ua.get("skipped", 0), "open": ua.get(None, 0)},
             "last_run": (db.query("SELECT * FROM swing_runs ORDER BY id DESC LIMIT 1") or [None])[0],

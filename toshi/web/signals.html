@@ -80,13 +80,15 @@ function draw(cv,v,labels){const dpr=devicePixelRatio||1,w=cv.clientWidth,h=cv.c
   g.strokeStyle=cs.getPropertyValue(v.at(-1)>=v[0]?'--up':'--dn');g.lineWidth=2;g.beginPath();v.forEach((a,i)=>i?g.lineTo(x(i),y(a)):g.moveTo(x(i),y(a)));g.stroke();
   g.fillStyle=cs.getPropertyValue('--mut');g.fillText(labels[0],L,h-3);g.textAlign='right';g.fillText(labels.at(-1),w-8,h-3);g.textAlign='left'}
 
+const SL={breakout:'高値更新',pullback:'押し目(短期)'};
+const strat=r=>SL[r.strategy||'breakout'];
 const side=r=>r.side==='buy'?'<span class="buy">買い</span>':'<span class="sell">売り</span>';
 const paperState=r=>r.status==='filled'?`約定 ${r.fill_date} @${Math.round(r.fill_price).toLocaleString()}`:r.status==='cancelled'?`見送り(${esc(r.note||'')})`:'<span class="mut">翌営業日に約定予定</span>';
 const userState=r=>r.user_action==='ordered'?`<span class="ok">注文した</span>${r.user_price?' @'+Number(r.user_price).toLocaleString():''}${r.user_shares?' '+r.user_shares+'株':''}`:r.user_action==='skipped'?'<span class="mut">見送り</span>':'<span class="err">未記録</span>';
 const btns=r=>`<button class="s" onclick="act(${r.id},'ordered',${r.shares})">注文した</button> <button class="s" onclick="act(${r.id},'skipped')">見送り</button>`+(r.user_action?` <button class="s" onclick="act(${r.id},'clear')">取消</button>`:'');
 const rec=r=>userState(r)+'<br>'+btns(r);
-const COLS=[['判定日',r=>r.as_of],['銘柄',r=>esc(r.name)+' ('+r.symbol+')','t'],['売買',side],['推奨株数',r=>r.shares.toLocaleString()],
-  ['概算金額',r=>yen(r.est_amount)],['損切り価格',r=>r.stop_price?yen(r.stop_price):'-'],['理由',r=>esc(r.reason),'t'],['ペーパー口座',paperState,'t'],['あなたの記録(実際に注文したか)',rec,'t']];
+const COLS=[['判定日',r=>r.as_of],['銘柄',r=>esc(r.name)+' ('+r.symbol+')','t'],['売買',r=>side(r)+'<br><span class="mut">'+strat(r)+'</span>'],['推奨株数',r=>r.shares.toLocaleString()],
+  ['概算金額',r=>yen(r.est_amount)],['損切り/利確の目安',r=>r.stop_price?'損切り '+yen(r.stop_price)+(r.target?'<br>利確 '+yen(r.target):''):'-'],['理由',r=>esc(r.reason),'t'],['ペーパー口座',paperState,'t'],['あなたの記録(実際に注文したか)',rec,'t']];
 
 async function act(id,kind,shares){
   let body={action:kind};
@@ -96,7 +98,7 @@ async function act(id,kind,shares){
 
 const li=a=>'<ul>'+a.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>';
 function renderRules(d){const r=d.rules;
-  $('#rules').innerHTML=`<p>${esc(r.outline)}</p><h3>${esc(r.buy_title)}</h3>${li(r.buy)}<h3>${esc(r.sell_title)}</h3>${li(r.sell)}<h3>${esc(r.stop_title)}</h3>${li(r.stop)}<h3>${esc(r.size_title)}</h3>${li(r.size)}<h3>前提・注意</h3>${li(r.notes)}`;
+  $('#rules').innerHTML=`<p>${esc(r.outline)}</p><p><b>対象の銘柄:</b> ${esc(r.universe)}</p><h3>${esc(r.buy_title)}</h3>${li(r.buy)}<h3>${esc(r.sell_title)}</h3>${li(r.sell)}${r.pullback_title?`<h3>${esc(r.pullback_title)}</h3>${li(r.pullback)}`:''}<h3>${esc(r.stop_title)}</h3>${li(r.stop)}<h3>${esc(r.size_title)}</h3>${li(r.size)}<h3>前提・注意</h3>${li(r.notes)}`;
   const b=d.backtest;
   if(!b){$('#bt').innerHTML=d.bt_running?'計算中です(数分かかります)…':'まだ計算されていません。';return}
   if(b.error){$('#bt').textContent=b.error;return}
@@ -110,10 +112,11 @@ function renderRules(d){const r=d.rules;
   ${row('期間の損益(資金に対して)',m=>`<span class="${cls(m.total_return_pct)}">${pct(m.total_return_pct)}</span>`)}
   ${row('PF(総利益÷総損失。1より大きければ利益超過)',m=>m.profit_factor??'-')}
   ${row('1回あたりの平均損益',m=>pct(m.avg_pnl_pct,2))}${row('平均の保有日数',m=>m.avg_hold_days==null?'-':m.avg_hold_days+'日')}
+  ${['breakout','pullback'].map(k=>row('　うち '+SL[k]+'(回数・勝率・平均損益)',m=>{const b=m.by_strategy&&m.by_strategy[k];return b&&b.trades?`${b.trades}回・${rate(b.win_rate)}・${pct(b.avg_pnl_pct,2)}`:'-'})).join('')}
   ${row('(参考)TOPIX連動ETFを持ち続けた場合',m=>pct(m.bench_return_pct))}</table>
   ${ws.some(([k,m])=>m.trades<30)?'<div class="note">売買回数が30回未満の期間があります。回数が少ないと、成績は偶然の影響が大きく、あてになりません。</div>':''}
   <div class="note"><b>この結果の読み方(良く見えすぎる理由)</b>${li([
-   '「今の」代表的な大型株だけで検証しています。過去に人気がなくなった銘柄は含まれないため、成績が良く見えがちです。',
+   '売買代金の上位は各日の時点で選んでいますが、候補は「2024年12月時点」のかぶミニ対象銘柄です。その後に上場廃止などで消えた銘柄は含まれないため、成績が良く見えがちです。',
    '約定は翌営業日の始値にコスト(片道0.2%)を見込んだ仮定で、実際の約定価格とは異なります。',
    '損切りは終値で判定するため、日中の急落やギャップで、損切り価格より大きく下がることがあります(この結果にも反映されています)。',
    '過去の成績は、将来の利益を保証しません。相場の地合いが変わると、同じルールでも成績は大きく変わります。'])}</div>`}
@@ -128,14 +131,14 @@ async function refresh(){
     const ch=s.channels.length?`<span class="ok">通知先: ${s.channels.join('・')}</span>`:'<span class="err">通知先が未設定です。.env にメールまたは LINE の設定を入れてください(README の「通知の設定」)。</span>';
     $('#status').innerHTML=`平日 ${esc(s.signal_at)} 以降に、日足でシグナルを判定します(パソコンを起動しておいてください)。 ${ch}`+
       (s.last_run?`<div class="mut">前回: ${esc(s.last_run.ts)} / ${esc(s.last_run.note||'')} / 通知 ${esc(s.last_run.notified||'-')}</div>`:'')+
-      `<div class="mut">対象 ${s.universe}銘柄`+(s.mini_only?`(楽天証券かぶミニ対象のみ。一覧は${esc(s.mini_as_of)}時点。注文前に対象か確認してください`+(s.excluded.length?`。対象外のため除外: ${s.excluded.map(esc).join('、')}`:'')+')':'')+'</div>'+(s.running?'<div>判定中…</div>':'')+(s.last_error?`<div class="err">⚠ ${esc(s.last_error)}</div>`:'');
+      `<div class="mut">対象: `+(s.universe_mode==='liquid'?`楽天証券かぶミニ対象のうち、売買代金の上位${s.topn}銘柄を毎晩選定(今夜のデータ取得: ${s.loaded.loaded??'-'}銘柄)。一覧は${esc(s.mini_as_of)}時点なので、注文前に対象か確認してください`:`固定の${s.universe}銘柄`+(s.mini_only?`(かぶミニ対象のみ。一覧は${esc(s.mini_as_of)}時点`+(s.excluded.length?`。対象外のため除外: ${s.excluded.map(esc).join('、')}`:'')+')':''))+(s.pullback?'。売買は「高値更新」と「押し目(短期)」の2種類':'')+'</div>'+(s.running?'<div>判定中…</div>':'')+(s.last_error?`<div class="err">⚠ ${esc(s.last_error)}</div>`:'');
     const latest=sigs.length?sigs[0].as_of:null,lt=sigs.filter(r=>r.as_of===latest);
     $('#latestdate').textContent=latest?`(${latest} の引け後に判定)`:'';
     if(lt.length){$('#latest').className='';$('#latest').innerHTML='<table id="lt"></table>';table($('#lt'),COLS.slice(1),lt)}
     else{$('#latest').className='mut';$('#latest').textContent=s.last_date?`${s.last_date} はシグナルなしでした(条件を満たす銘柄・保有中の売り条件が無い日です)。`:'まだ判定されていません。「今すぐ判定」を押すか、平日の夜をお待ちください。'}
     table($('#hist'),COLS,sigs);
-    table($('#pos'),[['銘柄',r=>esc(r.name)+' ('+r.symbol+')','t'],['株数',r=>r.shares],['取得単価',r=>Math.round(r.avg_price).toLocaleString()],['損切り価格',r=>yen(r.stop_price)],['評価損益',r=>`<span class="${cls(r.pnl)}">${yen(r.pnl)} (${pct(r.pnl_pct)})</span>`],['取得日',r=>r.entry_date]],pos);
-    table($('#trades'),[['決済日',r=>r.exit_date],['銘柄',r=>esc(r.name)+' ('+r.symbol+')','t'],['株数',r=>r.shares],['損益',r=>`<span class="${cls(r.pnl)}">${yen(r.pnl)} (${pct(r.pnl_pct)})</span>`],['理由',r=>esc(r.reason),'t']],tr);
+    table($('#pos'),[['銘柄',r=>esc(r.name)+' ('+r.symbol+')<br><span class="mut">'+strat(r)+(r.strategy==='pullback'?' '+(r.days||0)+'日目':'')+'</span>','t'],['株数',r=>r.shares],['取得単価',r=>Math.round(r.avg_price).toLocaleString()],['損切り価格',r=>yen(r.stop_price)],['評価損益',r=>`<span class="${cls(r.pnl)}">${yen(r.pnl)} (${pct(r.pnl_pct)})</span>`],['取得日',r=>r.entry_date]],pos);
+    table($('#trades'),[['決済日',r=>r.exit_date],['銘柄',r=>esc(r.name)+' ('+r.symbol+')','t'],['種類',r=>strat(r)],['株数',r=>r.shares],['損益',r=>`<span class="${cls(r.pnl)}">${yen(r.pnl)} (${pct(r.pnl_pct)})</span>`],['理由',r=>esc(r.reason),'t']],tr);
     draw($('#chart'),eq.map(r=>r.equity),eq.length?[eq[0].date,eq.at(-1).date]:[]);
     renderRules(rules);
   }catch(e){console.error(e)}}

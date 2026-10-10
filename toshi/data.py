@@ -44,6 +44,19 @@ class DataProvider:
         df = self.history(symbol, 40)
         return float(df["Close"].iloc[-1]) if df is not None and len(df) else None
 
+    def daily_many(self, symbols: list[str], years: int = 3) -> dict[str, pd.DataFrame]:
+        """多数の銘柄の日足をまとめて取得する。取得できなかった銘柄は含めない。"""
+        out = {}
+        for s in symbols:
+            try:
+                df = self.daily(s, years)
+            except Exception as e:  # noqa: BLE001
+                log.warning("daily %s failed: %s", s, e)
+                continue
+            if df is not None and len(df):
+                out[s] = df
+        return out
+
     def day_return(self, symbol: str, date: str) -> float | None:
         """指定日の始値→終値の騰落率(%)。ベンチマーク比較用。取得不能なら None。"""
         df = self.intraday(symbol)
@@ -90,6 +103,40 @@ class YFinanceProvider(DataProvider):
 
     def daily(self, symbol: str, years: int = 3):
         return naive_daily(self._get(symbol, f"{years}y", "1d", 600))
+
+    def daily_many(self, symbols: list[str], years: int = 3, chunk: int = 100) -> dict[str, pd.DataFrame]:
+        """yf.download で100銘柄ずつまとめて取得する(1銘柄ずつより圧倒的に速い)。失敗した銘柄は含めない。"""
+        import yfinance as yf
+
+        period, out, todo = f"{years}y", {}, []
+        for s in symbols:
+            hit = self._cache.get((s, "1d", period))
+            if hit and time.time() - hit[0] < 600:
+                out[s] = naive_daily(hit[1])
+            else:
+                todo.append(s)
+        cols = ["Open", "High", "Low", "Close", "Volume"]
+        for i in range(0, len(todo), chunk):
+            part = todo[i:i + chunk]
+            try:
+                raw = yf.download([f"{s}.T" for s in part], period=period, interval="1d", auto_adjust=False,
+                                  group_by="ticker", threads=True, progress=False)
+            except Exception as e:  # noqa: BLE001
+                log.warning("yfinance download failed: %s", e)
+                continue
+            if raw is None or raw.empty:
+                continue
+            for s in part:
+                try:
+                    sub = raw[f"{s}.T"] if isinstance(raw.columns, pd.MultiIndex) else raw
+                    df = sub[cols].dropna()
+                except (KeyError, TypeError):
+                    continue
+                if df.empty:
+                    continue
+                self._cache[(s, "1d", period)] = (time.time(), df)
+                out[s] = naive_daily(df)
+        return out
 
 
 class SyntheticProvider(DataProvider):

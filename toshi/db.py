@@ -49,6 +49,14 @@ CREATE TABLE IF NOT EXISTS runs (
 """
 
 
+# 既存のDB(古い版で作成)に、後から増えた列を足す。(テーブル, 列, 型)
+MIGRATIONS = [
+    ("swing_signals", "strategy", "TEXT"), ("swing_signals", "target", "REAL"),
+    ("swing_positions", "strategy", "TEXT"), ("swing_positions", "target", "REAL"),
+    ("swing_positions", "days", "INTEGER"), ("swing_trades", "strategy", "TEXT"),
+]
+
+
 def now() -> datetime:
     return datetime.now(JST)
 
@@ -66,6 +74,11 @@ class DB:
         self.lock = threading.RLock()
         with self.lock:
             self.conn.executescript(SCHEMA)
+            for table, col, decl in MIGRATIONS:
+                cols = [r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")]
+                if col not in cols:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+            self.conn.commit()
 
     def execute(self, sql: str, args: tuple = ()) -> int:
         with self.lock:
