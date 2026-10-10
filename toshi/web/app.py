@@ -10,7 +10,7 @@ from pydantic import BaseModel
 import json
 from typing import Literal
 
-from .. import analytics, premarket, swing
+from .. import analytics, premarket, review, swing
 from ..engine import Engine, market_open
 from ..signals import SignalService
 from ..universe import MINI_AS_OF
@@ -58,15 +58,14 @@ def create_app(engine: Engine, svc: SignalService | None = None) -> FastAPI:
         ua = {r["user_action"]: r["n"] for r in db.query(
             "SELECT user_action, COUNT(*) n FROM swing_signals GROUP BY user_action")}
         return {
-            "mode": "paper", "capital": cfg.initial_cash, "equity": equity, "cash": cash,
+            "mode": "paper", "capital": svc.p.capital, "equity": equity, "cash": cash,
             "total_pnl": equity - cfg.initial_cash, "positions": db.query("SELECT COUNT(*) n FROM swing_positions")[0]["n"],
             "trades": tr["n"], "win_rate": round(tr["w"] / tr["n"], 3) if tr["n"] else None, "realized": tr["p"],
             "last_date": db.get("swing_last_date"), "signal_at": cfg.signal_at,
-            "pos_pct": cfg.signal_pos_pct, "max_positions": cfg.signal_max_positions,
+            "pos_pct": svc.p.pos_pct, "max_positions": svc.p.max_positions,
             "channels": svc.notifier.channels(), "last_error": svc.last_error, "running": svc.running,
             "bt_running": svc.bt_running, "universe": len(cfg.signal_universe), "mini_only": cfg.mini_only,
-            "universe_mode": cfg.universe_mode, "topn": cfg.signal_topn if cfg.universe_mode == "liquid" else 0,
-            "pullback": cfg.signal_pullback, "loaded": json.loads(db.get("swing_universe_info") or "{}"),
+            "universe_mode": cfg.universe_mode, "topn": svc.p.topn, "pullback": svc.p.pullback, "loaded": json.loads(db.get("swing_universe_info") or "{}"),
             "mini_as_of": MINI_AS_OF, "excluded": [f"{swing_name(c)}({c})" for c in cfg.signal_excluded],
             "adherence": {"ordered": ua.get("ordered", 0), "skipped": ua.get("skipped", 0), "open": ua.get(None, 0)},
             "last_run": (db.query("SELECT * FROM swing_runs ORDER BY id DESC LIMIT 1") or [None])[0],
@@ -87,6 +86,37 @@ def create_app(engine: Engine, svc: SignalService | None = None) -> FastAPI:
             db.execute("UPDATE swing_signals SET user_action=?,user_price=?,user_shares=?,user_note=?,user_at=? WHERE id=?",
                        (body.action, body.price, body.shares, body.note, engine.clock().strftime("%Y-%m-%d %H:%M:%S"), sid))
         return db.query("SELECT * FROM swing_signals WHERE id=?", (sid,))[0]
+
+    @app.get("/api/swing/reviews", dependencies=[Depends(auth)])
+    def swing_reviews():
+        hist = []
+        for r in db.query("SELECT * FROM swing_reviews WHERE kind='daily' ORDER BY date DESC LIMIT 14"):
+            b = json.loads(r["body"])
+            hist.append({"date": r["date"], "equity": b.get("equity"), "day_pnl": b.get("day_pnl"),
+                         "closed": len(b.get("closed_today", [])), "filled": len(b.get("filled_today", []))})
+        return {"daily": review.latest(db, "daily"), "weekly": review.latest(db, "weekly"), "history": hist,
+                "weekly_running": svc.weekly_running, "claude": bool(cfg.anthropic_key), "weekly_on": cfg.weekly_review}
+
+    @app.get("/api/swing/proposals", dependencies=[Depends(auth)])
+    def swing_proposals():
+        rows = db.query("SELECT * FROM swing_proposals ORDER BY id DESC LIMIT 30")
+        for r in rows:
+            r["evaluation"] = json.loads(r["evaluation"]) if r["evaluation"] else None
+            r["label"] = swing.PARAM_LABEL.get(r["param"], r["param"])
+        return {"proposals": rows, "applied": review.applied_changes(db)}
+
+    @app.post("/api/swing/proposals/{pid}/decide", dependencies=[Depends(auth)])
+    def swing_decide(pid: int, approve: bool):
+        r = svc.decide_proposal(pid, approve)
+        if r is None:
+            raise HTTPException(404, "承認待ちの提案が見つかりません")
+        return r
+
+    @app.post("/api/swing/review/run", dependencies=[Depends(auth)])
+    def swing_review_run():
+        if not svc.weekly_running:
+            threading.Thread(target=svc.weekly, daemon=True).start()
+        return {"started": True}
 
     @app.get("/api/swing/positions", dependencies=[Depends(auth)])
     def swing_positions():

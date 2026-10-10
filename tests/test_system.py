@@ -425,6 +425,7 @@ def svc_for(frames, clock="18:00", notifier=None, **kw):
     c = cfg(None, **kw)
     c.signal_universe = list(frames)
     c.universe_mode = "fixed"
+    c.weekly_review = False  # 週次の振り返りは、専用のテストで同期的に実行する
     db = DB(":memory:")
     return SignalService(c, db, FixedData(frames), notifier or FakeNotifier(), clock=at(clock)), db
 
@@ -626,3 +627,122 @@ def test_liquid_pool_includes_held_and_runs_end_to_end():
                " VALUES('9999',1,100,0.05,95,'2026-01-05','breakout',0)")
     assert "9999" in svc.pool() and len(svc.pool()) > 500  # かぶミニのリアルタイム対象 + 保有中の銘柄
     assert svc.run()["as_of"] == "2026-01-09"
+
+
+# ---------------- 日々の振り返り・週次の振り返り・改善提案 ----------------
+from toshi import review
+
+
+def seed_trades(db, pnls, strategy="breakout"):
+    for i, pnl in enumerate(pnls):
+        db.execute("INSERT INTO swing_trades(symbol,name,entry_date,exit_date,shares,entry_price,exit_price,pnl,pnl_pct,reason,strategy)"
+                   " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                   ("7203", "トヨタ自動車", "2026-01-05", f"2026-01-{10 + i:02d}", 10, 1000, 1000 + pnl / 10, pnl, pnl / 100, "損切り", strategy))
+
+
+def test_daily_review_stats_and_notes():
+    db = DB(":memory:")
+    db.execute("INSERT INTO swing_equity VALUES('2026-01-08',500000,500000)")
+    db.execute("INSERT INTO swing_equity VALUES('2026-01-09',480000,300000)")
+    seed_trades(db, [-3000, -2000, -4000, -1000, 2000, -2500, -1500, -3500, -2000, -1000])  # 勝率10%・10連敗に近い
+    rv = review.daily_review(db, "2026-01-09", 500_000)
+    assert rv["day_pnl"] == -20000 and rv["total_pnl"] == -20000 and rv["all"]["trades"] == 10
+    assert rv["all"]["win_rate"] == 0.1 and rv["all"]["payoff"] is not None
+    text = "\n".join(rv["notes"])
+    assert "勝率" in text and "連敗" in text and "PF" in text
+    lines = "\n".join(review.format_review(rv))
+    assert "今日の振り返り" in lines and "480,000円" in lines
+    seed = review.daily_review(DB(":memory:"), "2026-01-09", 500_000)  # 記録が無い日も落ちない
+    assert seed["equity"] is None and "10回に満たない" in "".join(seed["notes"])
+
+
+def test_notification_includes_daily_review_even_without_signals():
+    n = FakeNotifier()
+    svc, db = svc_for({"7203": bars(breakout=False)}, notifier=n)
+    r = svc.run()
+    assert r["signals"] == 0 and len(n.sent) == 1  # シグナルが無い日も、振り返りつきで届く
+    head, body = n.sent[0]
+    assert "シグナルなし" in head and "今日の振り返り" in body and "ペーパー口座" in body
+    assert db.query("SELECT COUNT(*) n FROM swing_reviews WHERE kind='daily'")[0]["n"] == 1
+
+
+def test_clamp_param_whitelist_and_types():
+    p = swing.Params()
+    assert swing.clamp_param("pos_pct", 0.9, p) == 0.25 and swing.clamp_param("max_positions", 99, p) == 6
+    assert swing.clamp_param("max_positions", 4.4, p) == 4 and isinstance(swing.clamp_param("max_positions", 4, p), int)
+    assert swing.clamp_param("pullback", 0, p) is False
+    assert swing.clamp_param("capital", 1e9, p) is None and swing.clamp_param("pos_pct", "x", p) is None
+
+
+def test_evaluate_change_requires_improvement_in_both_periods():
+    frames = {"7203": bars(n=700), "6758": bars(n=700, base=2000)}
+    p = swing.Params(capital=500_000)
+    ev = swing.evaluate_change(frames, p, p)  # 同じ設定どうし = 良くならない → 不合格
+    assert ev["passed"] is False and ev["reasons"] and set(ev["base"]["windows"]) == {"直近1年", "その前の1年"}
+
+
+class FakeReviewer:
+    name = "claude"
+
+    def __init__(self, proposals):
+        self.proposals, self.payloads = proposals, []
+
+    def swing_review(self, payload):
+        self.payloads.append(payload)
+        return {"summary": "今週の総括", "worked": ["a"], "failed": ["b"], "lessons": ["c"], "proposals": self.proposals}
+
+
+def test_weekly_review_proposals_validated_and_approval_applies(monkeypatch):
+    frames = {"7203": bars(n=700), "6758": bars(n=700, base=2000)}
+    n = FakeNotifier()
+    fr = FakeReviewer([{"param": "stop_max", "value": 0.0001, "rationale": "広すぎる損切り"},
+                       {"param": "capital", "value": 1e9, "rationale": "不正な設定"},
+                       {"param": "pb_drop", "value": 0.05, "rationale": "押し目を深く"}])
+    svc, db = svc_for(frames, notifier=n)
+    svc._strategy = fr
+    # バックテストの検証結果を差し替え(1件目は合格、2件目は不合格)
+    results = iter([{"passed": True, "reasons": [], "base": {}, "cand": {}},
+                    {"passed": False, "reasons": ["直近1年の損益が良くならない"], "base": {}, "cand": {}}])
+    monkeypatch.setattr(swing, "evaluate_change", lambda *a, **k: next(results))
+    svc.run(notify=False)
+    out = svc.weekly()
+    assert [p["param"] for p in out["proposals"]] == ["stop_max", "pb_drop"]  # 不正な設定は捨てる
+    rows = db.query("SELECT * FROM swing_proposals ORDER BY id")
+    assert rows[0]["new_value"] == 0.05 and rows[0]["passed"] == 1 and rows[1]["passed"] == 0  # 範囲に丸め
+    assert fr.payloads and "tunable" in fr.payloads[0] and "paper_stats_all" in fr.payloads[0]
+    assert any("週次の振り返り" in h for h, _ in n.sent)
+    assert svc.p.stop_max == 0.08 and svc.p.pb_drop == 0.04  # 承認するまで反映しない
+    assert svc.decide_proposal(rows[0]["id"], True)["status"] == "applied" and svc.p.stop_max == 0.05
+    assert svc.decide_proposal(rows[1]["id"], False)["status"] == "rejected" and svc.p.pb_drop == 0.04
+    assert svc.decide_proposal(rows[0]["id"], False) is None  # 二重の決定は不可
+    svc2, _ = svc_for(frames)
+    svc2.db = db
+    svc2.load_overrides()  # 再起動後も維持
+    assert svc2.p.stop_max == 0.05
+    assert review.applied_changes(db)[0]["param"] == "stop_max"
+
+
+def test_weekly_review_without_api_key_makes_no_proposals():
+    svc, db = svc_for({"7203": bars(n=700)})
+    svc.cfg.anthropic_key = ""
+    svc._strategy = RuleStrategy()  # API キーなし
+    svc.run(notify=False)
+    out = svc.weekly(notify=False)
+    assert out["proposals"] == []
+    w = review.latest(db, "weekly")
+    assert w["by"] == "rule" and "ANTHROPIC_API_KEY" in w["summary"]
+
+
+def test_review_api_endpoints(tmp_path):
+    e = make_engine(Greedy(), "18:00", tmp_path)
+    svc, _ = svc_for({"7203": bars(n=700)})
+    svc.db = e.db
+    svc._strategy = FakeReviewer([])
+    svc.run(notify=False)
+    svc.weekly(notify=False)
+    cl = TestClient(create_app(e, svc))
+    rv = cl.get("/api/swing/reviews").json()
+    assert rv["daily"]["date"] and rv["weekly"]["summary"] == "今週の総括" and rv["history"]
+    pr = cl.get("/api/swing/proposals").json()
+    assert pr["proposals"] == [] and pr["applied"] == []
+    assert cl.post("/api/swing/proposals/999/decide?approve=true").status_code == 404

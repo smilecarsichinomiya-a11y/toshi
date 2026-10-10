@@ -45,6 +45,7 @@ ul{margin:4px 0;padding-left:20px}li{margin:3px 0}
 <main>
   <div class="kpis" id="kpis"></div>
   <div class="card" id="status"></div>
+  <div class="card"><h2>振り返りと改善 <span class="mut" id="rvdate"></span> <button class="s" id="rvrun" style="float:right">今すぐ週次の振り返り</button></h2><div id="rv" class="mut">夜の判定のあとに、今日の振り返りが表示されます。</div></div>
   <div class="card"><h2>最新のシグナル <span class="mut" id="latestdate"></span></h2><div id="latest" class="mut">まだシグナルがありません</div></div>
   <div class="card"><h2>シグナル履歴と、実際に注文したかの記録</h2>
     <div class="mut" style="margin-bottom:6px">「注文した」「見送り」を押して記録します(あとから直せます)。ペーパー口座は、すべてのシグナルを実行した前提で計算します。</div>
@@ -121,9 +122,39 @@ function renderRules(d){const r=d.rules;
    '損切りは終値で判定するため、日中の急落やギャップで、損切り価格より大きく下がることがあります(この結果にも反映されています)。',
    '過去の成績は、将来の利益を保証しません。相場の地合いが変わると、同じルールでも成績は大きく変わります。'])}</div>`}
 
+
+const PL={pos_pct:'1銘柄の上限',max_positions:'同時保有の上限',breakout_days:'高値更新の日数',exit_days:'安値割れの日数',vol_ratio:'出来高の倍率',max_overheat:'25日線からの乖離の上限',atr_mult:'①の損切り幅',stop_max:'①の損切り幅の上限',pb_drop:'押し目の下げ幅',pb_lookback:'押し目の高値を見る日数',pb_atr_mult:'②の損切り幅',pb_max_hold:'②の最長保有日数',pb_max_positions:'②の同時保有の上限',topn:'対象銘柄数',pullback:'押し目買い(1=使う)'};
+const ul=a=>a&&a.length?'<ul>'+a.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>':'<span class="mut">なし</span>';
+function evalHtml(ev){if(!ev||!ev.base||!ev.base.windows)return '<span class="mut">検証データなし</span>';
+  const rows=Object.keys(ev.base.windows).map(k=>{const b=ev.base.windows[k],c=ev.cand.windows[k];
+    return `<tr><td>${k}</td><td>${pct(b.total_return_pct)} → <b>${pct(c.total_return_pct)}</b></td><td>-${b.max_dd_pct}% → -${c.max_dd_pct}%</td><td>${b.trades} → ${c.trades}回</td></tr>`}).join('');
+  return `<table style="font-size:12px"><tr><th>期間</th><th>損益</th><th>最大下落幅</th><th>売買回数</th></tr>${rows}</table>`+(ev.passed?'':'<div class="err" style="font-size:12px">'+ev.reasons.map(esc).join('<br>')+'</div>')}
+async function decideProp(id,ok,passed){if(ok&&!passed&&!confirm('この変更は、バックテストの検証をクリアしていません。それでも適用しますか?'))return;
+  if(ok&&passed&&!confirm('この設定変更を適用します(次の夜の判定から反映)'))return;
+  await api('/api/swing/proposals/'+id+'/decide?approve='+ok,{method:'POST'});refresh()}
+function renderReview(rv,pr){
+  const d=rv.daily,w=rv.weekly;let h='';
+  if(d){$('#rvdate').textContent=`(${d.date} の引け後)`;
+    h+=`<h3>今日の振り返り</h3><div>総資産 <b>${yen(d.equity)}</b> / 今日 <span class="${cls(d.day_pnl)}">${d.day_pnl==null?'-':yen(d.day_pnl)}</span> / 累計 <span class="${cls(d.total_pnl)}">${yen(d.total_pnl)}</span> / 最高値から -${d.drawdown_pct}%</div>`;
+    const a=d.all;h+=`<div class="mut">通算 ${a.trades}回・勝率 ${rate(a.win_rate)}・PF ${a.profit_factor??'-'}・平均の勝ち ${yen(a.avg_win)} / 負け ${yen(-a.avg_loss)}</div>`;
+    h+=`<div class="mut">種類別: `+Object.entries(d.by_strategy).map(([k,v])=>`${SL[k]} ${v.trades}回・勝率${rate(v.win_rate)}・損益${yen(v.pnl)}`).join(' / ')+'</div>';
+    if(d.closed_today.length)h+='<div><b>決済</b>'+ul(d.closed_today.map(t=>`${t.name}(${t.symbol}) ${yen(t.pnl)}(${t.pnl_pct}%) ${t.reason}`))+'</div>';
+    if(d.notes.length)h+='<div><b>気づき</b>'+ul(d.notes)+'</div>'}
+  h+='<h3>週次の振り返り(Claude)</h3>';
+  if(w){h+=`<div class="mut">${w.date} 時点 / ${esc(w.by||'')}${w.error?' / ⚠ '+esc(w.error):''}</div><p>${esc(w.summary)}</p><div class="two"><div><b>うまくいったこと</b>${ul(w.worked)}</div><div><b>うまくいかなかったこと</b>${ul(w.failed)}</div></div><b>教訓</b>${ul(w.lessons)}`}
+  else h+=`<div class="mut">${rv.weekly_on?(rv.claude?'毎週金曜の夜(または前回から8日後)に行います。「今すぐ週次の振り返り」でも実行できます。':'Claude の振り返りには、.env に ANTHROPIC_API_KEY を設定してください。'):'週次の振り返りは、設定で無効です(TOSHI_WEEKLY_REVIEW)。'}</div>`;
+  if(rv.weekly_running)h+='<div>振り返り中…(数分かかります)</div>';
+  const pend=pr.proposals.filter(x=>x.status==='pending');
+  h+='<h3>改善提案(バックテストで検証済み・承認したものだけ反映)</h3>';
+  if(pr.proposals.length){h+='<table id="proptb"></table>'}else h+='<div class="mut">まだ提案はありません。根拠が弱いときは、提案しません。</div>';
+  if(pr.applied.length)h+='<h3>適用した変更の効果(ペーパー口座の決済済み取引。適用前の直近30回と、適用後)</h3><table id="apptb"></table>';
+  $('#rv').className='';$('#rv').innerHTML=h;
+  if(pr.proposals.length)table($('#proptb'),[['週',r=>r.week],['設定',r=>esc(r.label)],['変更',r=>r.old_value+' → '+r.new_value],['理由',r=>esc(r.rationale),'t'],['バックテストの検証',r=>(r.passed?'<b class="ok">クリア</b>':'<b class="err">未クリア</b>')+evalHtml(r.evaluation),'t'],['状態',r=>r.status==='pending'?`<button class="s" onclick="decideProp(${r.id},true,${r.passed})">承認</button> <button class="s" onclick="decideProp(${r.id},false,${r.passed})">却下</button>`:r.status==='applied'?'適用済み':'却下']],pr.proposals);
+  if(pr.applied.length)table($('#apptb'),[['適用日',r=>r.applied_from],['設定',r=>esc(r.label)],['変更',r=>r.old+' → '+r.new],['適用前',r=>`${r.before.trades}回・勝率${rate(r.before.win_rate)}・PF ${r.before.profit_factor??'-'}`],['適用後',r=>r.after.trades?`${r.after.trades}回・勝率${rate(r.after.win_rate)}・PF ${r.after.profit_factor??'-'}`:'<span class="mut">まだ決済なし</span>']],pr.applied)}
+
 async function refresh(){
   try{
-    const [s,sigs,pos,tr,eq,rules]=await Promise.all([api('/api/swing/summary'),api('/api/swing/signals?limit=300'),api('/api/swing/positions'),api('/api/swing/trades'),api('/api/swing/equity'),api('/api/swing/rules')]);
+    const [s,sigs,pos,tr,eq,rules,rvw,props]=await Promise.all([api('/api/swing/summary'),api('/api/swing/signals?limit=300'),api('/api/swing/positions'),api('/api/swing/trades'),api('/api/swing/equity'),api('/api/swing/rules'),api('/api/swing/reviews'),api('/api/swing/proposals')]);
     $('#last').textContent='最終判定日: '+(s.last_date||'まだ');
     const k=(l,v,c='')=>`<div class="card k"><div class="l">${l}</div><div class="v ${c}">${v}</div></div>`;
     const a=s.adherence,ans=a.ordered+a.skipped;
@@ -140,9 +171,10 @@ async function refresh(){
     table($('#pos'),[['銘柄',r=>esc(r.name)+' ('+r.symbol+')<br><span class="mut">'+strat(r)+(r.strategy==='pullback'?' '+(r.days||0)+'日目':'')+'</span>','t'],['株数',r=>r.shares],['取得単価',r=>Math.round(r.avg_price).toLocaleString()],['損切り価格',r=>yen(r.stop_price)],['評価損益',r=>`<span class="${cls(r.pnl)}">${yen(r.pnl)} (${pct(r.pnl_pct)})</span>`],['取得日',r=>r.entry_date]],pos);
     table($('#trades'),[['決済日',r=>r.exit_date],['銘柄',r=>esc(r.name)+' ('+r.symbol+')','t'],['種類',r=>strat(r)],['株数',r=>r.shares],['損益',r=>`<span class="${cls(r.pnl)}">${yen(r.pnl)} (${pct(r.pnl_pct)})</span>`],['理由',r=>esc(r.reason),'t']],tr);
     draw($('#chart'),eq.map(r=>r.equity),eq.length?[eq[0].date,eq.at(-1).date]:[]);
-    renderRules(rules);
+    renderRules(rules);renderReview(rvw,props);
   }catch(e){console.error(e)}}
 $('#run').onclick=async()=>{$('#run').disabled=true;await api('/api/swing/run',{method:'POST'});setTimeout(()=>{$('#run').disabled=false;refresh()},6000)};
+$('#rvrun').onclick=async()=>{$('#rvrun').disabled=true;await api('/api/swing/review/run',{method:'POST'});setTimeout(()=>{$('#rvrun').disabled=false;refresh()},8000)};
 $('#ntest').onclick=async()=>{const r=await api('/api/swing/notify_test',{method:'POST'});alert(r.configured?r.results.map(x=>x.channel+': '+(x.ok?'送信しました':'失敗 '+x.error)).join('\n'):'通知先が未設定です。.env にメールまたは LINE の設定を入れてください。')};
 const setTheme=t=>{document.documentElement.dataset.theme=t;$('#theme').textContent=t==='dark'?'☀':'🌙';try{localStorage.setItem('toshi_theme',t)}catch(e){}};
 setTheme(document.documentElement.dataset.theme);

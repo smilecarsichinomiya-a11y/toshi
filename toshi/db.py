@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS swing_trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, name TEXT, entry_date TEXT, exit_date TEXT, shares INTEGER,
   entry_price REAL, exit_price REAL, pnl REAL, pnl_pct REAL, reason TEXT);
 CREATE TABLE IF NOT EXISTS swing_equity (date TEXT PRIMARY KEY, equity REAL, cash REAL);
+-- 日々の振り返り(daily)と週次のClaudeの振り返り(weekly)、改善提案(検証つき・承認で適用)
+CREATE TABLE IF NOT EXISTS swing_reviews (date TEXT, kind TEXT, body TEXT, created_at TEXT, PRIMARY KEY(date, kind));
+CREATE TABLE IF NOT EXISTS swing_proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, week TEXT, param TEXT, old_value REAL, new_value REAL,
+  rationale TEXT, evaluation TEXT, passed INTEGER, status TEXT DEFAULT 'pending', decided_at TEXT, applied_from TEXT);
 CREATE TABLE IF NOT EXISTS swing_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, as_of TEXT, n_signals INTEGER, notified TEXT, note TEXT);
 CREATE TABLE IF NOT EXISTS runs (

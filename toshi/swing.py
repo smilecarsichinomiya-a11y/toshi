@@ -356,27 +356,102 @@ def metrics(sim: Sim, bench_ret: float | None = None) -> dict:
     }
 
 
-def backtest(bars: dict[str, pd.DataFrame], p: Params, windows: dict[str, int] | None = None,
+def backtest(bars: dict[str, pd.DataFrame], p: Params, windows: dict | None = None,
              bench: pd.DataFrame | None = None) -> dict:
-    """過去の日足に同じルールを当てはめる。windows = {"1年": 365, "2年": 730} (日数)。"""
+    """過去の日足に同じルールを当てはめる。
+
+    windows = {"1年": 365, "2年": 730} (最終日から何日前から) または {"その前の1年": (730, 365)} (何日前から何日前まで)。
+    """
     windows = windows or {"1年": 365, "2年": 730}
     mk = Market(bars, p)
     if not mk.dates:
         return {"error": "株価データがありません"}
     end = pd.Timestamp(mk.dates[-1])
     out = {"end": mk.dates[-1], "symbols": len(mk.symbols), "topn": p.topn, "windows": {}}
-    for label, days in windows.items():
-        start = (end - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+    for label, span in windows.items():
+        frm, to = (span, 0) if isinstance(span, int) else span
+        start = (end - pd.Timedelta(days=frm)).strftime("%Y-%m-%d")
+        stop = (end - pd.Timedelta(days=to)).strftime("%Y-%m-%d")
         sim = Sim(p)
-        for d in (x for x in mk.dates if x >= start):
+        for d in (x for x in mk.dates if start <= x <= stop):
             sim.process_day(d, mk.rows_for(d, sim.need()))
         b = None
         if bench is not None and len(bench):
-            bb = bench[bench.index >= pd.Timestamp(start)]["Close"]
+            bb = bench[(bench.index >= pd.Timestamp(start)) & (bench.index <= pd.Timestamp(stop))]["Close"]
             if len(bb) > 1:
                 b = round((float(bb.iloc[-1]) / float(bb.iloc[0]) - 1) * 100, 1)
-        out["windows"][label] = {"start": next((x for x in mk.dates if x >= start), start), **metrics(sim, b)}
+        out["windows"][label] = {"start": next((x for x in mk.dates if x >= start), start), "stop": stop,
+                                 **metrics(sim, b)}
     return out
+
+
+# ---------------------------------------------------------------- 改善案の検証(過剰適合を避けるための関門)
+# 改善で変えてよい設定と、その範囲。範囲の外や、ここに無い設定は提案されても捨てる。
+TUNABLE: dict[str, tuple[float, float]] = {
+    "pos_pct": (0.10, 0.25), "max_positions": (3, 6), "breakout_days": (10, 60), "exit_days": (5, 20),
+    "vol_ratio": (1.0, 2.0), "max_overheat": (0.08, 0.25), "atr_mult": (1.5, 3.0), "stop_max": (0.05, 0.12),
+    "pb_drop": (0.02, 0.08), "pb_lookback": (3, 10), "pb_atr_mult": (1.0, 2.5), "pb_max_hold": (5, 20),
+    "pb_max_positions": (0, 3), "topn": (50, 300), "pullback": (0, 1),
+}
+PARAM_LABEL = {
+    "pos_pct": "1銘柄の上限(総資産に対する割合)", "max_positions": "同時保有の上限", "breakout_days": "高値更新の日数",
+    "exit_days": "安値割れの日数(①の売り)", "vol_ratio": "出来高の倍率", "max_overheat": "25日線からの乖離の上限",
+    "atr_mult": "①の損切り幅(ATR倍率)", "stop_max": "①の損切り幅の上限", "pb_drop": "押し目の下げ幅",
+    "pb_lookback": "押し目の高値を見る日数", "pb_atr_mult": "②の損切り幅(ATR倍率)", "pb_max_hold": "②の最長保有日数",
+    "pb_max_positions": "②の同時保有の上限", "topn": "対象銘柄数(売買代金の上位)", "pullback": "押し目買いを使う(1=使う)",
+}
+
+
+def clamp_param(name: str, value, p: Params):
+    """設定名と値を検証して、範囲内の値(その設定の型)にして返す。使えない設定は None。"""
+    if name not in TUNABLE:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if v != v:
+        return None
+    lo, hi = TUNABLE[name]
+    v = min(hi, max(lo, v))
+    cur = getattr(p, name)
+    if isinstance(cur, bool):
+        return bool(round(v))
+    return int(round(v)) if isinstance(cur, int) else round(v, 4)
+
+
+def with_change(p: Params, name: str, value) -> Params:
+    q = Params(**{f.name: getattr(p, f.name) for f in fields(p)})
+    setattr(q, name, value)
+    return q
+
+
+EVAL_PERIODS = {"直近1年": (365, 0), "その前の1年": (730, 365)}
+
+
+def evaluate_change(bars: dict[str, pd.DataFrame], base: Params, cand: Params,
+                    bench: pd.DataFrame | None = None) -> dict:
+    """現在の設定(base)と変更案(cand)を、同じ2つの期間でバックテストして比べる。
+
+    合格(passed)の条件 — 次をすべて満たす:
+      ① 2つの期間の両方で、期間の損益が現在の設定より良い(片方の期間だけ良い変更は、たまたまの可能性が高い)
+      ② 最大下落幅が、現在の設定より2ポイントを超えて悪化しない
+      ③ 売買回数が、現在の設定の6割を下回らない(売買を減らして成績を良く見せただけの変更を除く)
+    """
+    b = backtest(bars, base, EVAL_PERIODS, bench)
+    c = backtest(bars, cand, EVAL_PERIODS, bench)
+    if "error" in b or "error" in c:
+        return {"passed": False, "reasons": ["検証に必要な株価データがありません"], "base": b, "cand": c}
+    reasons = []
+    for label in EVAL_PERIODS:
+        bw, cw = b["windows"][label], c["windows"][label]
+        if not cw["total_return_pct"] > bw["total_return_pct"]:
+            reasons.append(f"{label}の損益が良くならない({bw['total_return_pct']:+.1f}% → {cw['total_return_pct']:+.1f}%)")
+        if cw["max_dd_pct"] > bw["max_dd_pct"] + 2.0:
+            reasons.append(f"{label}の最大下落幅が悪化({bw['max_dd_pct']:.1f}% → {cw['max_dd_pct']:.1f}%)")
+        if bw["trades"] and cw["trades"] < 0.6 * bw["trades"]:
+            reasons.append(f"{label}の売買回数が大きく減る({bw['trades']}回 → {cw['trades']}回)")
+    return {"passed": not reasons, "reasons": reasons, "base": b, "cand": c}
 
 
 # ---------------------------------------------------------------- 初心者向けの説明

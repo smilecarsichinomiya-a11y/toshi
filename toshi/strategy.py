@@ -122,6 +122,9 @@ class Strategy:
     def premarket(self, ctx: dict) -> dict:
         raise NotImplementedError  # 未対応の戦略は標準銘柄(universe)で売買する
 
+    def swing_review(self, payload: dict) -> dict:
+        raise NotImplementedError  # API キーが無いときは、Claude の振り返りは行わない
+
 
 PREMARKET_RESEARCH = """あなたは日本株デイトレードの朝の準備担当です。本日(date)の東証の寄り付き前です。
 Web検索で次を調べ、調査メモ(日本語、箇条書き)にまとめてください。
@@ -152,6 +155,39 @@ PREMARKET_SCHEMA = {
         "sources": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["outlook", "picks", "sources"],
+    "additionalProperties": False,
+}
+
+
+SWING_REVIEW_PROMPT = """あなたは日本株の日足スイングトレード(ペーパートレード・かぶミニで1株単位)の運用責任者です。
+目的は、**長期的な利益を最大化する**ことです。渡されたデータ(ペーパー口座の取引・成績、売買の種類別の成績、バックテスト、
+現在の設定、過去に適用した変更とその前後の成績)を分析し、1週間の振り返りと、設定の改善案を出してください。
+
+守ること:
+- 事実(数値)に基づく。運と実力を混同しない。**取引が10件未満の種類や期間は、断定しない**(「サンプル不足」と書く)。
+- 負けた取引は、損切り幅・保有期間・地合い(ベンチマークの動き)・売買の種類の観点で、共通点を探す。
+- 勝ちを伸ばす・負けを小さくする・無駄な売買を減らす、のうち、利益への寄与が大きいものから提案する。
+- proposals は 0〜2個。**根拠が弱いとき・サンプルが少ないときは、0個(変更なし)でよい。** 無理に出さない。
+  提案は tunable に挙げた設定と範囲内のみ。pending_proposals にある設定は再提案しない。
+  提案はシステムが2つの期間のバックテストで自動検証し、合格したものだけがユーザーに推奨される。過去の1期間にだけ合う変更や、
+  売買回数を減らして見かけの成績を良くするだけの変更は不合格になる。
+- applied_changes に、適用済みの変更とその前後の成績がある。効果が出ていない変更は、元に戻す案も検討する。
+- 初心者にも分かる言葉で書く。専門用語には短い説明を添える。
+出力は指定の JSON スキーマに従うこと。"""
+
+SWING_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string", "description": "今週の総括(3〜6文)"},
+        "worked": {"type": "array", "items": {"type": "string"}},
+        "failed": {"type": "array", "items": {"type": "string"}},
+        "lessons": {"type": "array", "items": {"type": "string"}},
+        "proposals": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"param": {"type": "string"}, "value": {"type": "number"}, "rationale": {"type": "string"}},
+            "required": ["param", "value", "rationale"], "additionalProperties": False}},
+    },
+    "required": ["summary", "worked", "failed", "lessons", "proposals"],
     "additionalProperties": False,
 }
 
@@ -187,6 +223,12 @@ class ClaudeStrategy(Strategy):
     def review(self, payload: dict) -> dict:
         r = self._call(REVIEW_PROMPT, REVIEW_SCHEMA, payload, "本日のデータです。振り返ってください。", "high")
         r["lessons"] = r.get("lessons", [])[:5]
+        return r
+
+    def swing_review(self, payload: dict) -> dict:
+        r = self._call(SWING_REVIEW_PROMPT, SWING_REVIEW_SCHEMA, payload, "今週のデータです。振り返って、改善案を出してください。", "high")
+        r["lessons"] = r.get("lessons", [])[:5]
+        r["proposals"] = r.get("proposals", [])[:2]
         return r
 
     def premarket(self, ctx: dict) -> dict:

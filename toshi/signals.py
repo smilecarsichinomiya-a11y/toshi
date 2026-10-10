@@ -7,16 +7,17 @@ import threading
 
 import pandas as pd
 
-from . import swing
+from . import review, swing
 from .db import DB, now
 from .notify import Notifier
+from .strategy import make_strategy
 from .universe import MINI_AS_OF, name_of, pool_realtime
 
 log = logging.getLogger("toshi.signals")
 BACKTEST_MAX_AGE_DAYS = 7
 
 
-def format_notice(as_of: str, sigs: list[dict], capital: float) -> tuple[str, str]:
+def format_notice(as_of: str, sigs: list[dict], capital: float, review_lines: list[str] | None = None) -> tuple[str, str]:
     """通知の本文。銘柄名・コード、買い/売り、推奨株数、概算金額、損切り価格。"""
     sells = [s for s in sigs if s["side"] == "sell"]
     buys = [s for s in sigs if s["side"] == "buy"]
@@ -41,6 +42,8 @@ def format_notice(as_of: str, sigs: list[dict], capital: float) -> tuple[str, st
     if not sigs:
         lines.append("本日の売買シグナルはありません。")
         lines.append("")
+    if review_lines:
+        lines += review_lines + [""]
     lines.append("※投資判断と注文は自己責任です。注文したか見送ったかは、ダッシュボードに記録してください。")
     if MINI_AS_OF:
         lines.append(f"※かぶミニ対象銘柄は{MINI_AS_OF}時点の一覧で絞っています。注文前に、対象かどうかをご確認ください。")
@@ -49,15 +52,32 @@ def format_notice(as_of: str, sigs: list[dict], capital: float) -> tuple[str, st
 
 
 class SignalService:
-    def __init__(self, cfg, db: DB, data, notifier: Notifier | None = None, clock=now):
+    def __init__(self, cfg, db: DB, data, notifier: Notifier | None = None, clock=now, strategy=None):
         self.cfg, self.db, self.data, self.clock = cfg, db, data, clock
+        self._strategy = strategy
         self.p = swing.Params.from_cfg(cfg)
+        self.load_overrides()
+        self.weekly_running = False
         self.notifier = notifier or Notifier(cfg)
         self.last_error = ""
         self.running = False
         self.bt_running = False
         self._lock = threading.Lock()
         self._stop = threading.Event()
+
+    def reviewer(self):
+        if self._strategy is None:
+            self._strategy = make_strategy(self.cfg)  # API キーがあれば Claude、無ければ(振り返りは数字のまとめだけ)
+        return self._strategy
+
+    def load_overrides(self) -> None:
+        """承認済みの設定変更を、起動時に反映する。"""
+        for name in swing.TUNABLE:
+            v = self.db.get(f"swing_override_{name}")
+            if v is not None:
+                new = swing.clamp_param(name, v, self.p)
+                if new is not None:
+                    setattr(self.p, name, new)
 
     # --- データ ---
     def _completed(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -158,9 +178,11 @@ class SignalService:
                 fills, sigs = sim.process_day(d, mk.rows_for(d, sim.need()))
                 self._save_day(sim, d, fills, sigs, n_before)
                 final = sigs
+            rv = review.daily_review(self.db, last, self.p.capital)
+            review.save(self.db, last, "daily", rv, self.clock().strftime("%Y-%m-%d %H:%M:%S"))
             sent = ""
             if notify and (final or self.cfg.notify_empty):
-                head, body = format_notice(last, final, self.p.capital)
+                head, body = format_notice(last, final, self.p.capital, review.format_review(rv))
                 res = self.notifier.send(head, body)
                 sent = ", ".join(f"{r['channel']}:{'OK' if r['ok'] else 'NG ' + r['error']}" for r in res) \
                     or "通知先が未設定"
@@ -172,6 +194,7 @@ class SignalService:
             self.db.execute("INSERT INTO swing_runs(ts,as_of,n_signals,notified,note) VALUES(?,?,?,?,?)",
                             (self.clock().strftime("%Y-%m-%d %H:%M:%S"), last, len(final), sent, note))
             self.last_error = ""
+            self._maybe_weekly(last, raw, notify)
             return {"as_of": last, "signals": len(final), "notified": sent, "failed": len(failed)}
         except Exception as e:  # noqa: BLE001
             log.exception("signal run failed")
@@ -180,6 +203,73 @@ class SignalService:
         finally:
             self.running = False
             self._lock.release()
+
+    # --- 週次の振り返りと改善提案 ---
+    def _maybe_weekly(self, as_of: str, raw: dict, notify: bool) -> None:
+        """金曜の夜(または前回から8日以上たったとき)に、Claude の週次の振り返りを、別スレッドで1回行う。"""
+        last = self.db.get("swing_weekly_last")
+        due = pd.Timestamp(as_of).weekday() == 4 or last is None or (pd.Timestamp(as_of) - pd.Timestamp(last)).days >= 8
+        if self.cfg.weekly_review and due and last != as_of and not self.weekly_running:
+            self.db.set("swing_weekly_last", as_of)  # 失敗しても同じ日に何度も呼ばない(API費用の暴走防止)
+            threading.Thread(target=self.weekly, args=(as_of, raw, notify), daemon=True, name="toshi-weekly").start()
+
+    def weekly(self, as_of: str | None = None, raw: dict | None = None, notify: bool = True) -> dict:
+        if self.weekly_running:
+            return {"skipped": "実行中"}
+        self.weekly_running = True
+        try:
+            if raw is None:
+                raw, _ = self._fetch(self.pool())
+            as_of = as_of or self.db.get("swing_last_date") or self.clock().strftime("%Y-%m-%d")
+            rv = review.daily_review(self.db, as_of, self.p.capital)
+            payload = review.weekly_payload(self.db, self.p, self.backtest_result())
+            try:
+                r = self.reviewer().swing_review(payload) | {"by": getattr(self.reviewer(), "name", "claude")}
+            except NotImplementedError:
+                r = review.rule_weekly(self.db, rv)
+            except Exception as e:  # noqa: BLE001
+                log.warning("weekly review failed: %s", e)
+                r = review.rule_weekly(self.db, rv) | {"error": str(e)}
+                self.last_error = f"週次の振り返り: {e}"
+            bench = None
+            try:
+                bench = self.data.daily(self.cfg.benchmark, 3)
+            except Exception:  # noqa: BLE001
+                pass
+            props = review.make_proposals(self, as_of, r, raw, bench) if raw else []
+            review.save(self.db, as_of, "weekly", r | {"made": props}, self.clock().strftime("%Y-%m-%d %H:%M:%S"))
+            if notify:
+                lines = [f"{as_of} 時点の、1週間の振り返りです。", "", r["summary"], ""]
+                lines += [f"・{x}" for x in r.get("lessons", [])]
+                if props:
+                    lines += ["", "■ 改善案(ダッシュボードで、承認か却下を選んでください)"]
+                    for pr in props:
+                        lines.append(f"・{swing.PARAM_LABEL.get(pr['param'], pr['param'])} → {pr['new']}"
+                                     f"({'バックテストの検証をクリア' if pr['passed'] else '検証は未クリア。見送り推奨'})")
+                self.notifier.send(f"【toshi】週次の振り返り({as_of})", "\n".join(lines))
+            return {"as_of": as_of, "proposals": props}
+        except Exception as e:  # noqa: BLE001
+            log.exception("weekly failed")
+            self.last_error = f"週次の振り返り: {e}"
+            return {"error": str(e)}
+        finally:
+            self.weekly_running = False
+
+    def decide_proposal(self, pid: int, approve: bool) -> dict | None:
+        r = self.db.query("SELECT * FROM swing_proposals WHERE id=? AND status='pending'", (pid,))
+        if not r:
+            return None
+        r = r[0]
+        now_s = self.clock().strftime("%Y-%m-%d %H:%M:%S")
+        if approve:
+            new = swing.clamp_param(r["param"], r["new_value"], self.p)
+            setattr(self.p, r["param"], new)
+            self.db.set(f"swing_override_{r['param']}", str(r["new_value"]))
+            self.db.execute("UPDATE swing_proposals SET status='applied',decided_at=?,applied_from=? WHERE id=?",
+                            (now_s, self.db.get("swing_last_date") or now_s[:10], pid))
+        else:
+            self.db.execute("UPDATE swing_proposals SET status='rejected',decided_at=? WHERE id=?", (now_s, pid))
+        return self.db.query("SELECT * FROM swing_proposals WHERE id=?", (pid,))[0]
 
     def notify_test(self) -> list[dict]:
         if not self.notifier.channels():

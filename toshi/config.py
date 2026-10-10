@@ -44,10 +44,11 @@ class Config:
     universe_mode: str = "liquid"  # liquid: かぶミニ対象から売買代金の上位を毎晩選ぶ / fixed: signal_universe の固定リスト
     signal_topn: int = 150  # liquid のとき、売買代金の上位何銘柄を対象にするか
     signal_pullback: bool = True  # 押し目買い(短期)も使う
+    weekly_review: bool = True  # 週1回、Claude が振り返って改善案を出す(API キーが必要)
     signal_pos_pct: float = 0.20  # 1銘柄の上限(総資産に対する割合)
     signal_max_positions: int = 5
     signal_cost_pct: float = 0.002  # 片道のコスト(スプレッド等)の仮定
-    notify_empty: bool = False  # シグナルが無い日にも通知する
+    notify_empty: bool = True  # シグナルが無い日にも通知する(毎晩、今日の振り返りを届ける)
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_user: str = ""
@@ -111,10 +112,11 @@ def load_config() -> Config:
         universe_mode="fixed" if sig.strip() or not mini_only else "liquid",
         signal_topn=_i("TOSHI_SIGNAL_TOPN", 150),
         signal_pullback=_s("TOSHI_PULLBACK", "yes").lower() == "yes",
+        weekly_review=_s("TOSHI_WEEKLY_REVIEW", "yes").lower() == "yes",
         signal_pos_pct=_f("TOSHI_SIGNAL_POS_PCT", 0.20),
         signal_max_positions=_i("TOSHI_SIGNAL_MAX_POSITIONS", 5),
         signal_cost_pct=_f("TOSHI_SIGNAL_COST_PCT", 0.002),
-        notify_empty=_s("TOSHI_NOTIFY_EMPTY", "no").lower() == "yes",
+        notify_empty=_s("TOSHI_NOTIFY_EMPTY", "yes").lower() == "yes",
         smtp_host=_s("TOSHI_SMTP_HOST", ""),
         smtp_port=_i("TOSHI_SMTP_PORT", 587),
         smtp_user=_s("TOSHI_SMTP_USER", ""),
