@@ -24,7 +24,7 @@ def _stats(trades: list[dict]) -> dict:
             "payoff": round(aw / al, 2) if al else None}  # 平均の勝ち額 ÷ 平均の負け額
 
 
-def daily_review(db: DB, as_of: str, capital: float) -> dict:
+def daily_review(db: DB, as_of: str, capital: float, market: dict | None = None) -> dict:
     """その日の振り返り。数字と、数字から機械的に言える観察だけを出す(Claude は使わない)。"""
     eqs = db.query("SELECT * FROM swing_equity WHERE date<=? ORDER BY date DESC LIMIT 2", (as_of,))
     today = eqs[0] if eqs else None
@@ -47,7 +47,7 @@ def daily_review(db: DB, as_of: str, capital: float) -> dict:
         "positions": [{"name": name_of(r["symbol"]), "symbol": r["symbol"], "strategy": r["strategy"],
                        "pnl_pct": round(((r["last_price"] or r["avg_price"]) / r["avg_price"] - 1) * 100, 1)}
                       for r in positions],
-        "all": _stats(trades), "by_strategy": by,
+        "all": _stats(trades), "by_strategy": by, "market": market, "news_stats": news_stats(db),
     }
     out["notes"] = observations(out, trades)
     return out
@@ -68,6 +68,10 @@ def observations(rv: dict, trades: list[dict]) -> list[str]:
         st = rv["by_strategy"][k]
         if st["trades"] >= 8 and st["profit_factor"] is not None and st["profit_factor"] < 1:
             notes.append(f"「{label}」は{st['trades']}回でPF {st['profit_factor']}と、利益が出ていません。条件の見直しを検討します。")
+    mk = rv.get("market")
+    if mk and not mk["above"]:
+        notes.append(f"市場全体(TOPIX連動ETF)が{mk['days']}日線の下({mk['gap_pct']:+.1f}%)にあります。順張りの売買は、下降相場で負けやすいです。"
+                     "「改善提案」の市場フィルターの検証結果を確認してください。")
     streak = 0
     for t in reversed(trades):
         if t["pnl"] <= 0:
@@ -79,6 +83,19 @@ def observations(rv: dict, trades: list[dict]) -> list[str]:
     if rv["drawdown_pct"] >= 10:
         notes.append(f"資産が最高値から-{rv['drawdown_pct']}%下がっています。")
     return notes
+
+
+VERDICT_LABEL = {"ok": "問題なし", "caution": "注意", "avoid": "見送り推奨"}
+
+
+def news_stats(db: DB) -> dict:
+    """ニュース判定(買いシグナル時点)ごとの、決済済み取引の成績。判定が役に立つかを確かめるための集計。"""
+    ver = {(r["symbol"], r["fill_date"]): r["news_verdict"] for r in db.query(
+        "SELECT symbol, fill_date, news_verdict FROM swing_signals WHERE side='buy' AND status='filled'")}
+    groups: dict[str, list[dict]] = {}
+    for t in db.query("SELECT * FROM swing_trades"):
+        groups.setdefault(ver.get((t["symbol"], t["entry_date"])) or "none", []).append(t)
+    return {k: _stats(v) for k, v in groups.items()}
 
 
 def format_review(rv: dict) -> list[str]:
@@ -93,6 +110,9 @@ def format_review(rv: dict) -> list[str]:
         lines.append(f"・約定: {f['name']}({f['symbol']}) {'買い' if f['side'] == 'buy' else '売り'} {f['shares']:,}株 @{f['price']:,}円")
     if rv["positions"]:
         lines.append("保有中: " + "、".join(f"{p['name']} {p['pnl_pct']:+.1f}%" for p in rv["positions"]))
+    mk = rv.get("market")
+    if mk:
+        lines.append(f"地合い: TOPIX連動ETFは{mk['days']}日線の{'上' if mk['above'] else '下'}({mk['gap_pct']:+.1f}%)")
     a = rv["all"]
     if a["trades"]:
         lines.append(f"通算: {a['trades']}回・勝率{a['win_rate'] * 100:.0f}%・PF {a['profit_factor'] if a['profit_factor'] is not None else '-'}")

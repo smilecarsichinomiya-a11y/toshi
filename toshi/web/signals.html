@@ -82,6 +82,8 @@ function draw(cv,v,labels){const dpr=devicePixelRatio||1,w=cv.clientWidth,h=cv.c
   g.fillStyle=cs.getPropertyValue('--mut');g.fillText(labels[0],L,h-3);g.textAlign='right';g.fillText(labels.at(-1),w-8,h-3);g.textAlign='left'}
 
 const SL={breakout:'高値更新',pullback:'押し目(短期)'};
+const VL={ok:'問題なし',caution:'注意',avoid:'見送り推奨'};
+const newsTag=r=>r.news_verdict==='ok'?'<br><span class="mut">ニュース: 問題なし</span>':r.news_verdict?`<br><span class="err">★ニュース: ${VL[r.news_verdict]} — ${esc(r.news_note||'')}</span>`:'';
 const strat=r=>SL[r.strategy||'breakout'];
 const side=r=>r.side==='buy'?'<span class="buy">買い</span>':'<span class="sell">売り</span>';
 const paperState=r=>r.status==='filled'?`約定 ${r.fill_date} @${Math.round(r.fill_price).toLocaleString()}`:r.status==='cancelled'?`見送り(${esc(r.note||'')})`:'<span class="mut">翌営業日に約定予定</span>';
@@ -89,7 +91,7 @@ const userState=r=>r.user_action==='ordered'?`<span class="ok">注文した</spa
 const btns=r=>`<button class="s" onclick="act(${r.id},'ordered',${r.shares})">注文した</button> <button class="s" onclick="act(${r.id},'skipped')">見送り</button>`+(r.user_action?` <button class="s" onclick="act(${r.id},'clear')">取消</button>`:'');
 const rec=r=>userState(r)+'<br>'+btns(r);
 const COLS=[['判定日',r=>r.as_of],['銘柄',r=>esc(r.name)+' ('+r.symbol+')','t'],['売買',r=>side(r)+'<br><span class="mut">'+strat(r)+'</span>'],['推奨株数',r=>r.shares.toLocaleString()],
-  ['概算金額',r=>yen(r.est_amount)],['損切り/利確の目安',r=>r.stop_price?'損切り '+yen(r.stop_price)+(r.target?'<br>利確 '+yen(r.target):''):'-'],['理由',r=>esc(r.reason),'t'],['ペーパー口座',paperState,'t'],['あなたの記録(実際に注文したか)',rec,'t']];
+  ['概算金額',r=>yen(r.est_amount)],['損切り/利確の目安',r=>r.stop_price?'損切り '+yen(r.stop_price)+(r.target?'<br>利確 '+yen(r.target):''):'-'],['理由',r=>esc(r.reason)+newsTag(r),'t'],['ペーパー口座',paperState,'t'],['あなたの記録(実際に注文したか)',rec,'t']];
 
 async function act(id,kind,shares){
   let body={action:kind};
@@ -140,6 +142,12 @@ function renderReview(rv,pr){
     h+=`<div class="mut">種類別: `+Object.entries(d.by_strategy).map(([k,v])=>`${SL[k]} ${v.trades}回・勝率${rate(v.win_rate)}・損益${yen(v.pnl)}`).join(' / ')+'</div>';
     if(d.closed_today.length)h+='<div><b>決済</b>'+ul(d.closed_today.map(t=>`${t.name}(${t.symbol}) ${yen(t.pnl)}(${t.pnl_pct}%) ${t.reason}`))+'</div>';
     if(d.notes.length)h+='<div><b>気づき</b>'+ul(d.notes)+'</div>'}
+  const mk=d&&d.market;
+  h+=`<h3>地合いとニュース</h3><div>`+(mk?`TOPIX連動ETFは${mk.days}日線の<b class="${mk.above?'ok':'err'}">${mk.above?'上':'下'}</b>(${pct(mk.gap_pct)})`:'<span class="mut">市場全体のデータを取得できていません</span>')+` / 市場フィルター: <b>${rv.regime?'オン(下のときは新規の買いを見送る)':'オフ'}</b></div>`;
+  const nw=rv.news;
+  if(nw){h+=`<div class="mut">${nw.date} のニュース確認 / 市場のリスク: ${({low:'低',medium:'中',high:'高'})[nw.market_risk]||'-'}</div><p>${esc(nw.market_view)}</p>`+ul(nw.items.map(i=>`${VL[i.verdict]}: ${i.symbol} — ${i.headline}`));if(nw.sources&&nw.sources.length)h+='<div class="mut">出典: '+nw.sources.slice(0,5).map(esc).join(' / ')+'</div>'}
+  else h+=`<div class="mut">${rv.news_check?(rv.claude?'買いシグナルや保有銘柄がある夜に、Claude がニュースを確認します。':'ニュース確認には、.env に ANTHROPIC_API_KEY が必要です。'):'ニュース確認は、設定で無効です(TOSHI_NEWS)。'}${rv.news_veto?'':' (今は、判定を知らせるだけで、ペーパー口座の売買には使いません)'}</div>`;
+  const ns=d&&d.news_stats;if(ns&&Object.keys(ns).length)h+='<div><b>ニュース判定ごとの成績(決済済み)</b>'+ul(Object.entries(ns).map(([k,v])=>`${k==='none'?'判定なし':VL[k]}: ${v.trades}回・勝率${rate(v.win_rate)}・損益${yen(v.pnl)}`))+'<div class="mut">「見送り推奨」の成績が悪ければ、見送りを有効にする(TOSHI_NEWS_VETO=yes)根拠になります。回数が少ないうちは判断できません。</div></div>';
   h+='<h3>週次の振り返り(Claude)</h3>';
   if(w){h+=`<div class="mut">${w.date} 時点 / ${esc(w.by||'')}${w.error?' / ⚠ '+esc(w.error):''}</div><p>${esc(w.summary)}</p><div class="two"><div><b>うまくいったこと</b>${ul(w.worked)}</div><div><b>うまくいかなかったこと</b>${ul(w.failed)}</div></div><b>教訓</b>${ul(w.lessons)}`}
   else h+=`<div class="mut">${rv.weekly_on?(rv.claude?'毎週金曜の夜(または前回から8日後)に行います。「今すぐ週次の振り返り」でも実行できます。':'Claude の振り返りには、.env に ANTHROPIC_API_KEY を設定してください。'):'週次の振り返りは、設定で無効です(TOSHI_WEEKLY_REVIEW)。'}</div>`;

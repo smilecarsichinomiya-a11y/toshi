@@ -26,6 +26,8 @@ class Params:
     max_positions: int = 5  # 同時保有の上限
     cost_pct: float = 0.002  # 片道のコスト(スプレッド等)の仮定
     topn: int = 0  # 売買代金の上位N銘柄だけを対象にする(0=絞らない)
+    regime: bool = False  # 市場フィルター: 市場全体(TOPIX連動ETF)が下降トレンドのとき、新規の買いを見送る
+    regime_days: int = 75  # 市場全体の終値がこの日数の移動平均より下なら「下降トレンド」
     # --- 高値更新(breakout) ---
     breakout_days: int = 20
     exit_days: int = 10
@@ -48,7 +50,7 @@ class Params:
     def from_cfg(cls, cfg) -> "Params":
         return cls(capital=cfg.initial_cash, pos_pct=cfg.signal_pos_pct, max_positions=cfg.signal_max_positions,
                    cost_pct=cfg.signal_cost_pct, pullback=cfg.signal_pullback,
-                   topn=cfg.signal_topn if cfg.universe_mode == "liquid" else 0)
+                   topn=cfg.signal_topn if cfg.universe_mode == "liquid" else 0, regime=cfg.signal_regime)
 
     def key(self) -> str:
         return "|".join(f"{f.name}={getattr(self, f.name)}" for f in fields(self))
@@ -140,8 +142,12 @@ class Market:
     COLS = ["Open", "High", "Low", "Close", "Volume", "sma25", "sma75", "hh", "ll", "vavg", "atr", "roc60",
             "high5", "prev_close", "tov20"]
 
-    def __init__(self, bars: dict[str, pd.DataFrame], p: Params):
+    def __init__(self, bars: dict[str, pd.DataFrame], p: Params, bench: pd.DataFrame | None = None):
         self.p = p
+        self.regime_off: set[str] = set()  # 市場フィルターで、新規の買いを見送る日
+        if p.regime and bench is not None and len(bench):
+            close = bench["Close"].sort_index()
+            self.regime_off = set(close.index[(close <= close.rolling(p.regime_days).mean()).to_numpy()].strftime("%Y-%m-%d"))
         prepped = {s: prep(df, p) for s, df in bars.items()}
         top = None
         if p.topn > 0 and prepped:
@@ -162,7 +168,8 @@ class Market:
             if top is not None:
                 flag = flag & top[s].reindex(d.index).fillna(False)
             for x in np.asarray(ds)[flag.to_numpy()]:
-                self.cand.setdefault(x, []).append(s)
+                if x not in self.regime_off:
+                    self.cand.setdefault(x, []).append(s)
         self.dates = sorted(dates)
         self.symbols = list(prepped)
 
@@ -363,7 +370,7 @@ def backtest(bars: dict[str, pd.DataFrame], p: Params, windows: dict | None = No
     windows = {"1年": 365, "2年": 730} (最終日から何日前から) または {"その前の1年": (730, 365)} (何日前から何日前まで)。
     """
     windows = windows or {"1年": 365, "2年": 730}
-    mk = Market(bars, p)
+    mk = Market(bars, p, bench)
     if not mk.dates:
         return {"error": "株価データがありません"}
     end = pd.Timestamp(mk.dates[-1])
@@ -391,7 +398,7 @@ TUNABLE: dict[str, tuple[float, float]] = {
     "pos_pct": (0.10, 0.25), "max_positions": (3, 6), "breakout_days": (10, 60), "exit_days": (5, 20),
     "vol_ratio": (1.0, 2.0), "max_overheat": (0.08, 0.25), "atr_mult": (1.5, 3.0), "stop_max": (0.05, 0.12),
     "pb_drop": (0.02, 0.08), "pb_lookback": (3, 10), "pb_atr_mult": (1.0, 2.5), "pb_max_hold": (5, 20),
-    "pb_max_positions": (0, 3), "topn": (50, 300), "pullback": (0, 1),
+    "pb_max_positions": (0, 3), "topn": (50, 300), "pullback": (0, 1), "regime": (0, 1), "regime_days": (25, 200),
 }
 PARAM_LABEL = {
     "pos_pct": "1銘柄の上限(総資産に対する割合)", "max_positions": "同時保有の上限", "breakout_days": "高値更新の日数",
@@ -399,6 +406,7 @@ PARAM_LABEL = {
     "atr_mult": "①の損切り幅(ATR倍率)", "stop_max": "①の損切り幅の上限", "pb_drop": "押し目の下げ幅",
     "pb_lookback": "押し目の高値を見る日数", "pb_atr_mult": "②の損切り幅(ATR倍率)", "pb_max_hold": "②の最長保有日数",
     "pb_max_positions": "②の同時保有の上限", "topn": "対象銘柄数(売買代金の上位)", "pullback": "押し目買いを使う(1=使う)",
+    "regime": "市場フィルター(1=市場全体が下降トレンドのとき新規の買いを見送る)", "regime_days": "市場フィルターの移動平均の日数",
 }
 
 
@@ -454,6 +462,17 @@ def evaluate_change(bars: dict[str, pd.DataFrame], base: Params, cand: Params,
     return {"passed": not reasons, "reasons": reasons, "base": b, "cand": c}
 
 
+def market_state(bench: pd.DataFrame | None, days: int) -> dict | None:
+    """市場全体(TOPIX連動ETF)が、移動平均線より上(上昇トレンド)か下かを調べる。"""
+    if bench is None or len(bench) < days + 1:
+        return None
+    c = bench["Close"].sort_index()
+    ma = float(c.rolling(days).mean().iloc[-1])
+    last = float(c.iloc[-1])
+    return {"date": c.index[-1].strftime("%Y-%m-%d"), "close": round(last, 1), "ma": round(ma, 1), "days": days,
+            "above": last > ma, "gap_pct": round((last / ma - 1) * 100, 1)}
+
+
 # ---------------------------------------------------------------- 初心者向けの説明
 def describe_rules(p: Params) -> dict:
     """現在のルールを、初心者向けの文章にする(数値は設定と必ず一致する)。"""
@@ -498,6 +517,9 @@ def describe_rules(p: Params) -> dict:
             "損切りは夜の終値で判定します。日中に価格を割っても、その場では通知されません。"
             "急落やギャップで、損切り価格より大きく下がった価格で売ることになる場合があります。",
         ],
+        "regime": ([f"市場フィルター(オン): 市場全体(TOPIX連動ETF)の終値が{p.regime_days}日移動平均線より下のあいだは、"
+                    "新規の買いシグナルを出しません(保有中の売りは通常どおり)。相場全体が下げているときの損失を減らすためです。"]
+                   if p.regime else []),
         "size_title": "金額と株数の決め方",
         "size": [
             f"1銘柄の上限は資金(現金+保有株の時価)の{pct(p.pos_pct)}、同時に持つのは最大{p.max_positions}銘柄まで。",

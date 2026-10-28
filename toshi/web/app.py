@@ -94,7 +94,8 @@ def create_app(engine: Engine, svc: SignalService | None = None) -> FastAPI:
             b = json.loads(r["body"])
             hist.append({"date": r["date"], "equity": b.get("equity"), "day_pnl": b.get("day_pnl"),
                          "closed": len(b.get("closed_today", [])), "filled": len(b.get("filled_today", []))})
-        return {"daily": review.latest(db, "daily"), "weekly": review.latest(db, "weekly"), "history": hist,
+        return {"daily": review.latest(db, "daily"), "weekly": review.latest(db, "weekly"), "news": review.latest(db, "news"),
+                "regime": svc.p.regime, "news_check": cfg.news_check, "news_veto": cfg.news_veto, "history": hist,
                 "weekly_running": svc.weekly_running, "claude": bool(cfg.anthropic_key), "weekly_on": cfg.weekly_review}
 
     @app.get("/api/swing/proposals", dependencies=[Depends(auth)])

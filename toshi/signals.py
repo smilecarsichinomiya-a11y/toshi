@@ -17,7 +17,8 @@ log = logging.getLogger("toshi.signals")
 BACKTEST_MAX_AGE_DAYS = 7
 
 
-def format_notice(as_of: str, sigs: list[dict], capital: float, review_lines: list[str] | None = None) -> tuple[str, str]:
+def format_notice(as_of: str, sigs: list[dict], capital: float, review_lines: list[str] | None = None,
+                  news_lines: list[str] | None = None) -> tuple[str, str]:
     """通知の本文。銘柄名・コード、買い/売り、推奨株数、概算金額、損切り価格。"""
     sells = [s for s in sigs if s["side"] == "sell"]
     buys = [s for s in sigs if s["side"] == "buy"]
@@ -35,6 +36,8 @@ def format_notice(as_of: str, sigs: list[dict], capital: float, review_lines: li
         for s in buys:
             lines += [f"・{name_of(s['symbol'])}({s['symbol']}) 買い {s['shares']:,}株 概算 {s['amount']:,.0f}円{tag(s)}",
                       f"  損切り価格 {s['stop_price']:,.0f}円(買値の約-{s['stop_pct'] * 100:.1f}%)"]
+            if s.get("news_verdict") in ("caution", "avoid"):
+                lines.append(f"  ★ニュース判定: {review.VERDICT_LABEL[s['news_verdict']]} — {s.get('news_note') or ''}")
             if s.get("target"):
                 lines.append(f"  利益確定の目安 {s['target']:,.0f}円(押し目前の高値)。戻らなければ約10営業日で売り")
             lines.append(f"  理由: {s['reason']}")
@@ -42,6 +45,8 @@ def format_notice(as_of: str, sigs: list[dict], capital: float, review_lines: li
     if not sigs:
         lines.append("本日の売買シグナルはありません。")
         lines.append("")
+    if news_lines:
+        lines += news_lines + [""]
     if review_lines:
         lines += review_lines + [""]
     lines.append("※投資判断と注文は自己責任です。注文したか見送ったかは、ダッシュボードに記録してください。")
@@ -107,6 +112,70 @@ class SignalService:
                 ok[s] = df
         return ok, failed
 
+    def bench(self) -> pd.DataFrame | None:
+        """市場全体(TOPIX連動ETF)の日足。取得できなければ None(市場フィルターは働かない)。"""
+        try:
+            df = self.data.daily(self.cfg.benchmark, 3)
+        except Exception as e:  # noqa: BLE001
+            log.warning("benchmark failed: %s", e)
+            return None
+        return self._completed(df) if df is not None and len(df) else None
+
+    def news(self, as_of: str, final: list[dict]) -> tuple[list[str], list[dict]]:
+        """買い候補と保有銘柄のニュースを Claude が確認する。(通知用の文章, 見送りにした買いシグナル) を返す。
+        失敗・API キーなしのときは、売買に影響を与えない(空で返す)。"""
+        buys = [s for s in final if s["side"] == "buy"]
+        held = [r["symbol"] for r in self.db.query("SELECT symbol FROM swing_positions")]
+        if not self.cfg.news_check or not (buys or held):
+            return [], []
+        ctx = {"date": as_of,
+               "candidates": [{"symbol": s["symbol"], "name": name_of(s["symbol"]), "strategy": s.get("strategy")} for s in buys],
+               "holdings": [{"symbol": c, "name": name_of(c)} for c in held]}
+        try:
+            res = self.reviewer().news_check(ctx)
+        except NotImplementedError:
+            return [], []
+        except Exception as e:  # noqa: BLE001
+            log.warning("news check failed: %s", e)
+            self.last_error = f"ニュース確認: {e}"
+            return [], []
+        items = {str(i.get("symbol")): i for i in res.get("items", [])}
+        vetoed = []
+        risk = {"low": "低", "medium": "中", "high": "高"}.get(res.get("market_risk"), "-")
+        lines = ["■ ニュース確認(Claude が Web 検索で確認した範囲です。確認できなかっただけで、安全とは限りません)",
+                 f"地合い: {res.get('market_view', '')}(市場のリスク: {risk})"]
+        for s in buys:
+            it = items.get(s["symbol"])
+            if not it:
+                continue
+            s["news_verdict"], s["news_note"] = it["verdict"], f"{it['headline']} / {it['reason']}"
+            self.db.execute("UPDATE swing_signals SET news_verdict=?,news_note=? WHERE id=?", (s["news_verdict"], s["news_note"], s["sid"]))
+            tag = "【買い候補】"
+            if self.cfg.news_veto and it["verdict"] == "avoid":
+                self.db.execute("UPDATE swing_signals SET status='cancelled',note=? WHERE id=?", (f"ニュースで見送り: {it['headline']}", s["sid"]))
+                vetoed.append(s)
+                tag = "【買い候補→ペーパーでは見送り】"
+            lines.append(f"・{name_of(s['symbol'])}({s['symbol']}) {tag}{review.VERDICT_LABEL[it['verdict']]}: {it['headline']}")
+        for c in held:
+            it = items.get(c)
+            if it:
+                lines.append(f"・{name_of(c)}({c}) 【保有中】{review.VERDICT_LABEL[it['verdict']]}: {it['headline']}")
+        review.save(self.db, as_of, "news", res, self.clock().strftime("%Y-%m-%d %H:%M:%S"))
+        return lines, vetoed
+
+    def _seed_presets(self, raw: dict, bench: pd.DataFrame | None) -> None:
+        """あらかじめ理由のある改善案(市場フィルター)を、一度だけ検証して、改善提案に載せる。"""
+        if self.db.get("swing_preset_regime") or self.p.regime or bench is None:
+            return
+        self.db.set("swing_preset_regime", "1")
+        cand = swing.with_change(self.p, "regime", True)
+        ev = swing.evaluate_change(raw, self.p, cand, bench)
+        self.db.execute(
+            "INSERT INTO swing_proposals(created_at,week,param,old_value,new_value,rationale,evaluation,passed) VALUES(?,?,?,?,?,?,?,?)",
+            (self.clock().strftime("%Y-%m-%d %H:%M:%S"), "初期検討", "regime", 0.0, 1.0,
+             "上昇トレンドに乗る売買なので、市場全体が下降トレンドのときは新規の買いを見送る。相場全体が下げている時期の損失を減らす狙い。",
+             json.dumps(ev, ensure_ascii=False, default=float), int(ev["passed"])))
+
     # --- 状態の読み書き ---
     def _load_sim(self) -> swing.Sim:
         db = self.db
@@ -165,7 +234,8 @@ class SignalService:
             raw, failed = self._fetch(self.pool())
             if not raw:
                 raise RuntimeError("株価データを取得できませんでした(ネット接続を確認してください)")
-            mk = swing.Market(raw, self.p)
+            bench = self.bench()
+            mk = swing.Market(raw, self.p, bench)
             dates = mk.dates
             last, done = dates[-1], self.db.get("swing_last_date")
             if done == last:
@@ -178,11 +248,14 @@ class SignalService:
                 fills, sigs = sim.process_day(d, mk.rows_for(d, sim.need()))
                 self._save_day(sim, d, fills, sigs, n_before)
                 final = sigs
-            rv = review.daily_review(self.db, last, self.p.capital)
+            news_lines, vetoed = self.news(last, final) if notify else ([], [])
+            if vetoed:
+                final = [s for s in final if s not in vetoed]
+            rv = review.daily_review(self.db, last, self.p.capital, swing.market_state(bench, self.p.regime_days))
             review.save(self.db, last, "daily", rv, self.clock().strftime("%Y-%m-%d %H:%M:%S"))
             sent = ""
-            if notify and (final or self.cfg.notify_empty):
-                head, body = format_notice(last, final, self.p.capital, review.format_review(rv))
+            if notify and (final or self.cfg.notify_empty or news_lines):
+                head, body = format_notice(last, final, self.p.capital, review.format_review(rv), news_lines)
                 res = self.notifier.send(head, body)
                 sent = ", ".join(f"{r['channel']}:{'OK' if r['ok'] else 'NG ' + r['error']}" for r in res) \
                     or "通知先が未設定"
@@ -296,6 +369,7 @@ class SignalService:
             except Exception:  # noqa: BLE001
                 pass
             res = swing.backtest(raw, self.p, bench=bench)
+            self._seed_presets(raw, bench)
             res |= {"key": self.backtest_key(), "ts": self.clock().strftime("%Y-%m-%d %H:%M"), "failed": len(failed)}
             self.db.set("swing_backtest", json.dumps(res, ensure_ascii=False))
             return res

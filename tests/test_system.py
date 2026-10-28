@@ -423,7 +423,7 @@ class FixedData:
 
 def svc_for(frames, clock="18:00", notifier=None, **kw):
     c = cfg(None, **kw)
-    c.signal_universe = list(frames)
+    c.signal_universe = [k for k in frames if k != "1306"]  # 1306 は市場全体(ベンチマーク)
     c.universe_mode = "fixed"
     c.weekly_review = False  # 週次の振り返りは、専用のテストで同期的に実行する
     db = DB(":memory:")
@@ -746,3 +746,88 @@ def test_review_api_endpoints(tmp_path):
     pr = cl.get("/api/swing/proposals").json()
     assert pr["proposals"] == [] and pr["applied"] == []
     assert cl.post("/api/swing/proposals/999/decide?approve=true").status_code == 404
+
+
+# ---------------- 市場フィルター・ニュース確認 ----------------
+class NewsReviewer(FakeReviewer):
+    def __init__(self, verdict="avoid"):
+        super().__init__([])
+        self.verdict, self.ctxs = verdict, []
+
+    def news_check(self, ctx):
+        self.ctxs.append(ctx)
+        items = [{"symbol": c["symbol"], "verdict": self.verdict, "headline": "業績を大幅に下方修正", "reason": "利益が大きく減る見込み"}
+                 for c in ctx["candidates"]]
+        items += [{"symbol": h["symbol"], "verdict": "ok", "headline": "目立ったニュースなし", "reason": "確認できず"} for h in ctx["holdings"]]
+        return {"market_view": "米株安で地合いは弱い", "market_risk": "high", "items": items, "sources": ["日経 https://example.com"]}
+
+
+def test_market_regime_filter_blocks_new_buys_in_downtrend():
+    p_on, p_off = swing.Params(capital=500_000, regime=True), swing.Params(capital=500_000, regime=False)
+    down = bars(n=140, growth=-0.003, breakout=False)  # 市場全体が下降トレンド(75日線の下)
+    up = bars(n=140, growth=0.003, breakout=False)
+    frames = {"7203": bars()}
+    last = swing.Market(frames, p_off).dates[-1]
+    assert swing.Market(frames, p_off, down).cand.get(last)  # フィルターなし: 候補が出る
+    assert not swing.Market(frames, p_on, down).cand.get(last)  # 下降トレンドでは見送り
+    assert swing.Market(frames, p_on, up).cand.get(last)  # 上昇トレンドなら買える
+    ms = swing.market_state(down, 75)
+    assert ms["above"] is False and ms["gap_pct"] < 0 and swing.market_state(None, 75) is None
+
+
+def test_news_check_is_advisory_by_default_and_marks_signal():
+    n, nr = FakeNotifier(), NewsReviewer("avoid")
+    svc, db = svc_for({"7203": bars()}, notifier=n)
+    svc._strategy = nr
+    r = svc.run()
+    assert r["signals"] == 1 and nr.ctxs[0]["candidates"][0]["symbol"] == "7203"
+    row = db.query("SELECT * FROM swing_signals")[0]
+    assert row["status"] == "pending" and row["news_verdict"] == "avoid" and "下方修正" in row["news_note"]  # 既定は知らせるだけ
+    head, body = n.sent[0]
+    assert "ニュース確認" in body and "★ニュース判定: 見送り推奨" in body and "買い1件" in head
+    assert review.latest(db, "news")["market_risk"] == "high"
+
+
+def test_news_veto_cancels_paper_buy_when_enabled():
+    n = FakeNotifier()
+    svc, db = svc_for({"7203": bars()}, notifier=n, news_veto=True)
+    svc._strategy = NewsReviewer("avoid")
+    r = svc.run()
+    row = db.query("SELECT * FROM swing_signals")[0]
+    assert row["status"] == "cancelled" and "ニュースで見送り" in row["note"]  # ペーパー口座では買わない
+    assert r["signals"] == 0 and "ペーパーでは見送り" in n.sent[0][1]
+
+
+def test_news_check_skipped_without_api_key_or_candidates():
+    svc, db = svc_for({"7203": bars()})
+    svc._strategy = RuleStrategy()  # API キーなし
+    assert svc.run()["signals"] == 1 and db.query("SELECT news_verdict FROM swing_signals")[0]["news_verdict"] is None
+    nr = NewsReviewer()
+    svc2, _ = svc_for({"7203": bars(breakout=False)})
+    svc2._strategy = nr
+    svc2.run()
+    assert nr.ctxs == []  # 買い候補も保有も無い夜は、検索しない(費用の節約)
+
+
+def test_news_stats_group_trades_by_verdict():
+    db = DB(":memory:")
+    db.execute("INSERT INTO swing_signals(as_of,symbol,side,status,fill_date,news_verdict) VALUES('2026-01-05','7203','buy','filled','2026-01-06','avoid')")
+    db.execute("INSERT INTO swing_trades(symbol,name,entry_date,exit_date,shares,entry_price,exit_price,pnl,pnl_pct,reason,strategy)"
+               " VALUES('7203','トヨタ','2026-01-06','2026-01-20',1,1000,900,-100,-10,'損切り','breakout')")
+    db.execute("INSERT INTO swing_trades(symbol,name,entry_date,exit_date,shares,entry_price,exit_price,pnl,pnl_pct,reason,strategy)"
+               " VALUES('6758','ソニー','2026-01-06','2026-01-20',1,1000,1100,100,10,'利確','breakout')")
+    st = review.news_stats(db)
+    assert st["avoid"]["trades"] == 1 and st["avoid"]["pnl"] == -100 and st["none"]["trades"] == 1
+
+
+def test_regime_preset_proposal_is_seeded_once_with_validation():
+    frames = {"7203": bars(n=700), "6758": bars(n=700, base=2000), "1306": bars(n=700, growth=0.001, breakout=False)}
+    svc, db = svc_for(frames)
+    svc.backtest()
+    rows = db.query("SELECT * FROM swing_proposals")
+    assert len(rows) == 1 and rows[0]["param"] == "regime" and rows[0]["new_value"] == 1.0 and rows[0]["week"] == "初期検討"
+    ev = json.loads(rows[0]["evaluation"])
+    assert set(ev["cand"]["windows"]) == {"直近1年", "その前の1年"} and "passed" in ev
+    svc.backtest()
+    assert len(db.query("SELECT * FROM swing_proposals")) == 1  # 二重に作らない
+    assert svc.decide_proposal(rows[0]["id"], True)["status"] == "applied" and svc.p.regime is True

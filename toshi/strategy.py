@@ -125,6 +125,9 @@ class Strategy:
     def swing_review(self, payload: dict) -> dict:
         raise NotImplementedError  # API キーが無いときは、Claude の振り返りは行わない
 
+    def news_check(self, ctx: dict) -> dict:
+        raise NotImplementedError  # API キーが無いときは、ニュース確認は行わない
+
 
 PREMARKET_RESEARCH = """あなたは日本株デイトレードの朝の準備担当です。本日(date)の東証の寄り付き前です。
 Web検索で次を調べ、調査メモ(日本語、箇条書き)にまとめてください。
@@ -158,6 +161,41 @@ PREMARKET_SCHEMA = {
     "additionalProperties": False,
 }
 
+
+NEWS_RESEARCH = """あなたは日本株の日足スイングトレード(ペーパー)の、夜のニュース確認担当です。本日(date)の引け後です。
+Web検索で、次を調べ、調査メモ(日本語・箇条書き)にまとめてください。
+1. 市場全体: 今日の日経平均・TOPIX、前日の米国市場、為替(ドル円)、金利など、明日以降の地合いを左右する材料。
+2. candidates(これから買う候補)と holdings(保有中)の各銘柄について、直近1週間ほどのニュース:
+   決算(発表日が3営業日以内か、直近の決算・業績修正の内容)、不祥事・行政処分・訴訟・リコール、増資・公募・株式売出し、
+   格下げ・目標株価の引き下げ、上場廃止や監理銘柄のおそれ、大型の提携・受注・上方修正などの好材料。
+事実と推測を区別し、出典(媒体名・URL)を残すこと。確認できなかったことは「確認できず」と書く。銘柄名と証券コードを必ず対応させる。"""
+
+NEWS_PICK = """調査メモをもとに、各銘柄を判定してください。
+- verdict は次のどれか。
+  "avoid"(見送り推奨): 株価に大きな悪影響が出る、または出ている重大な悪材料が確認できた
+     (業績の大幅な下方修正、不祥事・重大な行政処分、増資・公募、大幅な格下げ、上場廃止のおそれなど)。
+  "caution"(注意): 決算発表が3営業日以内にあり、結果しだいで大きく動く(イベントリスク)。または、軽めの悪材料がある。
+  "ok": 目立った悪材料は確認できなかった。**確認できなかっただけで、安全という意味ではない**ことを、reason に書く。
+- 推測や、調査メモにない情報で判定しない。迷うときは "caution"。
+- headline は、判定の根拠になった事実を1文で(なければ「目立ったニュースなし」)。reason は、初心者にも分かる言葉で。
+- market_risk は、明日以降の市場全体の地合い: "low" / "medium" / "high"。
+出力は指定の JSON スキーマに従うこと。"""
+
+NEWS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "market_view": {"type": "string", "description": "市場全体の状況(2〜3文)"},
+        "market_risk": {"type": "string", "enum": ["low", "medium", "high"]},
+        "items": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}, "verdict": {"type": "string", "enum": ["ok", "caution", "avoid"]},
+                           "headline": {"type": "string"}, "reason": {"type": "string"}},
+            "required": ["symbol", "verdict", "headline", "reason"], "additionalProperties": False}},
+        "sources": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["market_view", "market_risk", "items", "sources"],
+    "additionalProperties": False,
+}
 
 SWING_REVIEW_PROMPT = """あなたは日本株の日足スイングトレード(ペーパートレード・かぶミニで1株単位)の運用責任者です。
 目的は、**長期的な利益を最大化する**ことです。渡されたデータ(ペーパー口座の取引・成績、売買の種類別の成績、バックテスト、
@@ -224,6 +262,24 @@ class ClaudeStrategy(Strategy):
         r = self._call(REVIEW_PROMPT, REVIEW_SCHEMA, payload, "本日のデータです。振り返ってください。", "high")
         r["lessons"] = r.get("lessons", [])[:5]
         return r
+
+    def news_check(self, ctx: dict) -> dict:
+        """1) Web検索でニュースを調べる 2) 調査メモから、銘柄ごとの判定を構造化出力で作る。"""
+        first = {"role": "user", "content": NEWS_RESEARCH + "\n```json\n" + json.dumps(ctx, ensure_ascii=False) + "\n```"}
+        msgs = [first]
+        tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 15,
+                  "user_location": {"type": "approximate", "country": "JP", "timezone": "Asia/Tokyo"}}]
+        notes = ""
+        for _ in range(4):
+            msg = self.client.messages.create(model=self.model, max_tokens=16000, tools=tools, messages=msgs)
+            notes += "".join(b.text for b in msg.content if b.type == "text")
+            if msg.stop_reason != "pause_turn":
+                break
+            msgs = [first, {"role": "assistant", "content": msg.content}]
+        if not notes.strip():
+            raise RuntimeError("ニュースの調査結果が空でした")
+        return self._call(NEWS_PICK, NEWS_SCHEMA, ctx | {"research_notes": notes},
+                          "調査メモと対象銘柄です。判定してください。", "medium")
 
     def swing_review(self, payload: dict) -> dict:
         r = self._call(SWING_REVIEW_PROMPT, SWING_REVIEW_SCHEMA, payload, "今週のデータです。振り返って、改善案を出してください。", "high")

@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS swing_signals (
   shares INTEGER, est_price REAL, est_amount REAL, stop_price REAL, stop_pct REAL, reason TEXT,
   status TEXT DEFAULT 'pending', fill_date TEXT, fill_price REAL, fill_shares INTEGER, note TEXT,
   notified INTEGER DEFAULT 0,
-  user_action TEXT, user_price REAL, user_shares INTEGER, user_note TEXT, user_at TEXT);
+  user_action TEXT, user_price REAL, user_shares INTEGER, user_note TEXT, user_at TEXT,
+  strategy TEXT, target REAL, news_verdict TEXT, news_note TEXT);
 CREATE TABLE IF NOT EXISTS swing_positions (
   symbol TEXT PRIMARY KEY, shares INTEGER, avg_price REAL, stop_pct REAL, stop_price REAL, entry_date TEXT,
   last_price REAL);
@@ -57,6 +58,7 @@ CREATE TABLE IF NOT EXISTS runs (
 # 既存のDB(古い版で作成)に、後から増えた列を足す。(テーブル, 列, 型)
 MIGRATIONS = [
     ("swing_signals", "strategy", "TEXT"), ("swing_signals", "target", "REAL"),
+    ("swing_signals", "news_verdict", "TEXT"), ("swing_signals", "news_note", "TEXT"),
     ("swing_positions", "strategy", "TEXT"), ("swing_positions", "target", "REAL"),
     ("swing_positions", "days", "INTEGER"), ("swing_trades", "strategy", "TEXT"),
 ]
