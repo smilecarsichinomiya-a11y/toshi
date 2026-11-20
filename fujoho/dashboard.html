@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>不倫情報局 ダッシュボード</title>
+<style>
+:root{--bg:#0b1020;--card:#131a30;--line:#25304f;--ink:#e8ecf8;--soft:#9aa6c7;--ok:#4ade80;--run:#38bdf8;--wait:#8b93ad;--warn:#fbbf24}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 -apple-system,"Segoe UI","Hiragino Sans",sans-serif}
+header{padding:20px 24px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+h1{font-size:18px;margin:0}
+.meta{color:var(--soft);font-size:12px}
+main{max-width:1100px;margin:0 auto;padding:20px 24px;display:grid;gap:20px}
+h2{font-size:14px;color:var(--soft);margin:0 0 10px;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.name{font-weight:700;font-size:16px}
+.role{color:var(--soft);font-size:12px}
+.st{display:inline-block;margin-top:8px;font-size:12px;padding:2px 10px;border-radius:99px;border:1px solid currentColor}
+.done{color:var(--ok)}.run{color:var(--run)}.wait{color:var(--wait)}.warn{color:var(--warn)}
+.sub{color:var(--soft);font-size:12px;margin-top:8px}
+ul{margin:0;padding:0;list-style:none}
+li{padding:9px 0;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+li:last-child{border:0}
+.tag{font-size:11px;padding:1px 8px;border-radius:99px;border:1px solid currentColor;white-space:nowrap}
+.time{color:var(--soft);font-size:12px;min-width:70px}
+.note{color:var(--soft);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>不倫情報局 ダッシュボード</h1>
+  <div class="meta">最終更新: <span id="upd"></span> / 手動更新(自動では動きません)。更新するには Claude に「ダッシュボード更新」と依頼</div>
+</header>
+<main>
+  <section><h2>メンバー(実在する3人)</h2><div class="grid" id="agents"></div></section>
+  <section class="card"><h2>あなたの作業(承認・確認待ち)</h2><ul id="todo"></ul></section>
+  <section class="card"><h2>今日・明日の投稿予定</h2><ul id="posts"></ul></section>
+  <section class="card"><h2>成果物(fujoho/)</h2><ul id="files"></ul></section>
+</main>
+<script>
+// ===== ここだけ更新する =====
+const DATA = {
+  updated: "2026-11-20",
+  agents: [
+    {name:"けんた", role:"リサーチ", status:"待機中", cls:"wait", last:"商品リサーチ(05)を完了"},
+    {name:"さくら", role:"編集長・戦略", status:"待機中", cls:"wait", last:"商品設計書(06)を完了"},
+    {name:"しょうた", role:"コピーライター", status:"待機中", cls:"wait", last:"note初稿(07)を完了"}
+  ],
+  todo: [
+    {tag:"今日", cls:"warn", text:"20:00 Threads 自己紹介を投稿 (03_shota_posts.md)"},
+    {tag:"公開前", cls:"warn", text:"原典確認25件 (07 末尾の【社内用】一覧)"},
+    {tag:"公開前", cls:"warn", text:"noteの仕様確認(価格範囲・手数料・ファイル添付・特商法)"},
+    {tag:"公開前", cls:"warn", text:"第三者2名に第0章を夜スマホで通読してもらう"},
+    {tag:"公開前", cls:"warn", text:"noteの競合有料記事を10件ほど目視で確認"},
+    {tag:"後日", cls:"wait", text:"A8.net登録(投稿が数本たまってから)"}
+  ],
+  posts: [
+    {t:"11/20 20:00", text:"Threads+X+IG 自己紹介『不倫情報局はじめました』", st:"未投稿", cls:"wait"},
+    {t:"11/20 22:30", text:"Threads 浮気を疑った夜のNG5つ", st:"未投稿", cls:"wait"},
+    {t:"11/21 8:00", text:"Threads 「気のせいかも」共感", st:"未投稿", cls:"wait"},
+    {t:"11/21 12:00", text:"Instagram 証拠になる/ならない線引き(7枚)", st:"未投稿", cls:"wait"},
+    {t:"11/21 21:30", text:"X 問い詰める前に", st:"未投稿", cls:"wait"}
+  ],
+  files: [
+    {f:"01_kenta_research.md", d:"初期リサーチ"},
+    {f:"02_sakura_calendar.md", d:"週間カレンダー 11/20〜11/26"},
+    {f:"03_shota_posts.md", d:"今日・明日の投稿文"},
+    {f:"04_kenta_monetization_check.md", d:"収益導線の法務チェック"},
+    {f:"05_kenta_product_research.md", d:"note商品のリサーチ"},
+    {f:"06_sakura_product_design.md", d:"note商品の設計書(公開目安12/9)"},
+    {f:"07_shota_note_draft.md", d:"note商品の初稿(約2.7万字・公開前確認が必要)"}
+  ]
+};
+// ===== 以下は触らない =====
+const e=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+document.getElementById('upd').textContent=DATA.updated;
+document.getElementById('agents').innerHTML=DATA.agents.map(a=>`<div class="card"><div class="name">${e(a.name)}</div><div class="role">${e(a.role)}</div><span class="st ${e(a.cls)}">${e(a.status)}</span><div class="sub">直近: ${e(a.last)}</div></div>`).join('');
+document.getElementById('todo').innerHTML=DATA.todo.map(x=>`<li><span class="tag ${e(x.cls)}">${e(x.tag)}</span><span>${e(x.text)}</span></li>`).join('');
+document.getElementById('posts').innerHTML=DATA.posts.map(x=>`<li><span class="time">${e(x.t)}</span><span>${e(x.text)}</span><span class="tag ${e(x.cls)}">${e(x.st)}</span></li>`).join('');
+document.getElementById('files').innerHTML=DATA.files.map(x=>`<li><span>${e(x.f)}</span><span class="note">${e(x.d)}</span></li>`).join('');
+</script>
+</body>
+</html>
