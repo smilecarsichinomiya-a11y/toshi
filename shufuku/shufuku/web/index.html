@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1f6feb">
+<title>修復歴チェッカー</title>
+<style>
+:root{
+  --bg:#f4f6f9; --card:#fff; --ink:#1b2430; --sub:#5b6776; --line:#dde3ea; --pri:#1f6feb; --pri-ink:#fff;
+  --ok:#1a8f4d; --ok-bg:#e3f6ea; --warn:#b7791f; --warn-bg:#fff4d6; --mid:#c2570c; --mid-bg:#ffe8d4;
+  --bad:#c62828; --bad-bg:#fde4e4; --mute:#8a94a3; --mute-bg:#eceff3;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#10151c; --card:#1a222c; --ink:#eef2f7; --sub:#a3afbf; --line:#2c3846; --pri:#4b8dff; --pri-ink:#fff;
+  --ok:#52c98a; --ok-bg:#16301f; --warn:#e6b450; --warn-bg:#3a3014; --mid:#ff9a52; --mid-bg:#3b2410;
+  --bad:#ff7b7b; --bad-bg:#3d1b1b; --mute:#8a94a3; --mute-bg:#232c37;
+}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 -apple-system,"Hiragino Sans","Noto Sans JP",Meiryo,sans-serif}
+#app{max-width:640px;margin:0 auto;padding:0 16px 120px}
+h1{font-size:24px;margin:20px 0 4px} h2{font-size:19px;margin:22px 0 8px} h3{font-size:16px;margin:0 0 4px}
+p{margin:6px 0} small,.sub{color:var(--sub);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin:12px 0}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:54px;padding:12px 16px;border:0;border-radius:14px;
+  background:var(--pri);color:var(--pri-ink);font:inherit;font-weight:700;font-size:17px;cursor:pointer;text-decoration:none}
+.btn.sec{background:var(--card);color:var(--pri);border:2px solid var(--pri)}
+.btn.ghost{background:transparent;color:var(--sub);border:1px solid var(--line);font-weight:500;min-height:44px;font-size:15px}
+.btn[disabled]{opacity:.45;pointer-events:none}
+.row{display:flex;gap:10px} .row>*{flex:1}
+.top{position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0 8px;margin:0 -16px;padding-left:16px;padding-right:16px;border-bottom:1px solid var(--line)}
+.steps{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none}
+.steps button{flex:1 0 auto;border:1px solid var(--line);background:var(--card);color:var(--sub);border-radius:999px;padding:7px 12px;font:inherit;font-size:14px;white-space:nowrap}
+.steps button.on{background:var(--pri);color:var(--pri-ink);border-color:var(--pri);font-weight:700}
+.steps button.done{color:var(--ok);border-color:var(--ok)}
+.foot{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--bg);border-top:1px solid var(--line);padding:10px 16px calc(10px + env(safe-area-inset-bottom))}
+.foot .in{max-width:640px;margin:0 auto}
+label.f{display:block;font-weight:700;margin:14px 0 4px}
+input[type=text],input[type=number],select{width:100%;min-height:50px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);font:inherit;font-size:17px}
+.seg{display:flex;gap:8px;flex-wrap:wrap}
+.seg button{flex:1;min-height:48px;border:2px solid var(--line);background:var(--card);color:var(--ink);border-radius:12px;font:inherit;font-weight:600;padding:6px 10px}
+.seg button.on{border-color:var(--pri);background:var(--pri);color:var(--pri-ink)}
+.seg button.on.ok{background:var(--ok);border-color:var(--ok)} .seg button.on.sus{background:var(--warn);border-color:var(--warn)}
+.seg button.on.bad{background:var(--bad);border-color:var(--bad)} .seg button.on.unk{background:var(--mute);border-color:var(--mute)}
+.badge{display:inline-block;font-size:12px;font-weight:700;padding:2px 9px;border-radius:999px;vertical-align:middle;background:var(--mute-bg);color:var(--sub)}
+.badge.must{background:var(--bad-bg);color:var(--bad)} .badge.high{background:var(--mid-bg);color:var(--mid)}
+.badge.basic{background:var(--ok-bg);color:var(--ok)} .badge.ok{background:var(--ok-bg);color:var(--ok)}
+.badge.possible{background:var(--warn-bg);color:var(--warn)} .badge.likely{background:var(--bad-bg);color:var(--bad)}
+.why{font-size:13px;color:var(--mid);margin:4px 0 0}
+.pt{display:block;width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer}
+.pt .t{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
+.pt.done{opacity:.9}
+.help{background:var(--warn-bg);color:var(--ink);border-radius:12px;padding:10px 14px;font-size:15px}
+.verdict{border-radius:16px;padding:18px;margin:14px 0;border:2px solid}
+.verdict.high{background:var(--bad-bg);border-color:var(--bad)} .verdict.mid{background:var(--mid-bg);border-color:var(--mid)}
+.verdict.low{background:var(--ok-bg);border-color:var(--ok)} .verdict.hold{background:var(--mute-bg);border-color:var(--mute)}
+.verdict .big{font-size:22px;font-weight:800;margin:0}
+.meter{height:10px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:8px}
+.meter i{display:block;height:100%;background:var(--pri)}
+.slot-h{font-weight:700;margin-bottom:6px}
+.slot-h b{color:var(--bad);font-size:12px;margin-left:6px}
+.cam{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-height:150px;border:2px dashed var(--pri);border-radius:14px;color:var(--pri);font-weight:700;overflow:hidden;cursor:pointer;background:var(--card)}
+.cam.has{border-style:solid;border-color:var(--ok);min-height:0}
+.cam img{width:100%;max-height:260px;object-fit:cover;display:block}
+.cam .cam-i{font-size:34px}
+.cam input{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer}
+.alt{display:inline-block;position:relative;font-size:14px;color:var(--sub);text-decoration:underline;margin-top:6px;cursor:pointer}
+.alt input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}
+.warn{color:var(--bad);font-size:14px;margin-top:6px}
+.chk{display:flex;gap:8px;padding:8px 0;border-top:1px solid var(--line);font-size:15px}
+.chk:first-child{border-top:0}
+.chk .ic{flex:0 0 26px;font-weight:800;text-align:center}
+.chk .ic.normal{color:var(--ok)} .chk .ic.suspicious{color:var(--bad)} .chk .ic.unclear{color:var(--mute)}
+.film{display:grid;grid-template-columns:1fr 112px;gap:8px 12px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
+.film:first-of-type{border-top:0}
+.film .nm{font-weight:600} .film .st{font-size:13px;color:var(--sub)}
+.film input{text-align:right;min-height:48px}
+.film.lv0 .st{color:var(--ok)} .film.lv1 .st{color:var(--warn)} .film.lv2 .st,.film.lv3 .st{color:var(--bad);font-weight:700} .film.lvm1 .st{color:var(--mute)}
+.film.lv1 input{border-color:var(--warn)} .film.lv2 input,.film.lv3 input{border-color:var(--bad)}
+svg.map{width:100%;max-width:300px;display:block;margin:6px auto}
+svg.map rect{stroke:var(--ink);stroke-opacity:.35;stroke-width:1;cursor:pointer}
+svg.map text{font-size:9px;fill:var(--ink);text-anchor:middle;pointer-events:none;font-weight:700}
+.u{fill:var(--mute-bg)} .l0{fill:var(--ok-bg)} .l1{fill:#ffd966} .l2{fill:#ff9f4a} .l3{fill:#ef5350} .lm1{fill:#c9b6e8}
+.legend{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;font-size:12px;color:var(--sub)}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-2px;border:1px solid var(--line)}
+.q{padding:12px 0;border-top:1px solid var(--line)} .q:first-of-type{border-top:0}
+textarea{width:100%;min-height:220px;border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--card);color:var(--ink);font:14px/1.6 ui-monospace,Menlo,monospace}
+.toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);background:#222;color:#fff;padding:10px 18px;border-radius:99px;z-index:20;font-size:15px;max-width:90%}
+.spin{width:18px;height:18px;border:3px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;animation:s 0.8s linear infinite}
+@keyframes s{to{transform:rotate(360deg)}}
+details>summary{cursor:pointer;color:var(--pri);font-weight:600;padding:8px 0}
+ol.how{padding-left:20px;margin:6px 0} ol.how li{margin:6px 0}
+.case{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.case .x{flex:0 0 auto;background:none;border:0;color:var(--mute);font-size:20px;padding:8px;cursor:pointer}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const KEY = "shufuku.cases.v1";
+const STEPS = [["vehicle","① 車の情報"],["film","② 膜厚"],["shoot","③ 撮影"],["visual","④ 目視"],["result","⑤ 結果"]];
+const PHOTOS = {};          // 撮った写真の本体(メモリのみ)。key = 案件:ポイント:枠
+let meta, cases = [], cur = null, ev = null, view = {name: "home"}, busy = false, evTimer;
+
+/* ---------- 保存 ---------- */
+function load(){ try{ cases = JSON.parse(localStorage.getItem(KEY) || "[]"); }catch{ cases = []; } }
+function save(){
+  if(cur && !cases.includes(cur)) cases.unshift(cur);
+  cases = cases.slice(0, 15);
+  try{ localStorage.setItem(KEY, JSON.stringify(cases)); }
+  catch{
+    for(const c of cases) if(c !== cur) for(const p of Object.values(c.points || {})) delete p.thumbs;
+    try{ localStorage.setItem(KEY, JSON.stringify(cases)); }catch{ toast("保存できませんでした(容量不足)"); }
+  }
+}
+function newCase(){
+  return {id: Date.now().toString(36), created: Date.now(), vehicle: {name:"", year:"", origin:"domestic", color:"solid", doors:4, normal_max:null}, film:{}, points:{}, visual:{}};
+}
+
+/* ---------- 通信 ---------- */
+async function api(path, body){
+  const h = {"content-type":"application/json"};
+  const code = localStorage.getItem("shufuku.code"); if(code) h["x-access-code"] = code;
+  const r = await fetch(path, {method: body ? "POST" : "GET", headers: h, body: body ? JSON.stringify(body) : undefined});
+  if(r.status === 401){
+    const c = prompt("アクセスコードを入力してください");
+    if(c){ localStorage.setItem("shufuku.code", c); return api(path, body); }
+    throw new Error("アクセスコードが必要です");
+  }
+  if(!r.ok){ let m = ""; try{ m = (await r.json()).detail; }catch{} throw new Error(typeof m === "string" && m ? m : "エラー " + r.status); }
+  return r.json();
+}
+function slim(c){
+  const points = {};
+  for(const [k, v] of Object.entries(c.points)) points[k] = {user: v.user, ai: v.ai ? {tamper_level: v.ai.tamper_level} : null};
+  return {vehicle: c.vehicle, film: c.film, visual: c.visual, points};
+}
+function scheduleEval(){ clearTimeout(evTimer); evTimer = setTimeout(runEval, 200); }
+async function runEval(){
+  if(!cur) return;
+  try{ ev = await api("/api/evaluate", slim(cur)); }catch{ return; }
+  cur.last = {label: ev.verdict.label, key: ev.verdict.key, score: ev.score}; save();
+  if(view.name === "case"){
+    if(view.step === "film") patchFilm();
+    else if(view.step === "shoot" || view.step === "result") render();
+  }else if(view.name === "point") patchFollow();
+}
+
+/* ---------- 小物 ---------- */
+function toast(t){ const d = document.createElement("div"); d.className = "toast"; d.textContent = t; document.body.appendChild(d); setTimeout(() => d.remove(), 2600); }
+const LV = {none:["ok","触った形跡は見つからない"], possible:["possible","触った形跡の疑いあり"], likely:["likely","触った形跡がかなり濃厚"], unclear:["","判断できない"]};
+const TIER = {must:["must","最優先"], high:["high","優先"], basic:["basic","基本"], optional:["","任意"]};
+function fmtDate(t){ const d = new Date(t); return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; }
+function go(v){ view = v; render(); window.scrollTo(0, 0); }
+
+/* ---------- 画面: ホーム ---------- */
+function homeHTML(){
+  const list = cases.map(c => `
+    <div class="card case"><div style="min-width:0" data-act="open" data-id="${c.id}" role="button">
+      <h3>${esc(c.vehicle.name || "名前なしの車")} ${c.vehicle.year ? `<small>${esc(c.vehicle.year)}</small>` : ""}</h3>
+      <small>${fmtDate(c.created)}${c.last ? " ・ " + esc(c.last.label) : ""}</small></div>
+      <button class="x" data-act="del" data-id="${c.id}" aria-label="削除">🗑</button></div>`).join("");
+  return `
+  <h1>修復歴チェッカー</h1>
+  <p class="sub">膜厚・ボルト・骨格の写真から、修復歴の「疑い」を見つける手助けをします。</p>
+  <button class="btn" data-act="start" style="margin-top:14px">＋ 新しい車を診断する</button>
+  <div class="card"><h3>使い方(30〜40分)</h3><ol class="how">
+    <li><b>膜厚を入力</b>:膜厚計で測った数字を打つ。厚い所は自動で色が変わります。</li>
+    <li><b>ボルトを撮る</b>:ガイドどおりスマホで撮影。AIが「触った跡」を調べます。</li>
+    <li><b>次の指示に従う</b>:怪しければ、次に撮る場所を自動で案内します。</li>
+    <li><b>結果をコピー</b>:査定メモとして貼り付けられます。</li></ol></div>
+  <div class="card"><small>AIの判定: ${meta.ai ? "✅ 使えます" : "⚠ 未設定(自分の目で判定するモードで動きます)"}<br>
+    ※これは「疑い」を見つける補助です。修復歴の有無は、必ず現物で最終確認してください。</small></div>
+  ${cases.length ? "<h2>これまでの診断</h2>" + list : ""}`;
+}
+
+/* ---------- 画面: ケース共通枠 ---------- */
+function stepIndex(){ return STEPS.findIndex(s => s[0] === view.step); }
+function caseHTML(){
+  const i = stepIndex();
+  const chips = STEPS.map((s, k) => `<button data-act="step" data-s="${s[0]}" class="${k === i ? "on" : (k < i ? "done" : "")}">${s[1]}</button>`).join("");
+  const body = {vehicle: vehicleHTML, film: filmHTML, shoot: shootHTML, visual: visualHTML, result: resultHTML}[view.step]();
+  const prev = i > 0 ? `<button class="btn ghost" data-act="step" data-s="${STEPS[i-1][0]}" style="flex:0 0 90px">戻る</button>` : `<button class="btn ghost" data-act="home" style="flex:0 0 90px">ホーム</button>`;
+  const next = i < STEPS.length - 1 ? `<button class="btn" data-act="step" data-s="${STEPS[i+1][0]}">次へ：${STEPS[i+1][1].slice(2)}</button>` : `<button class="btn" data-act="home">診断を終える</button>`;
+  return `<div class="top"><div class="steps">${chips}</div></div>${body}<div class="foot"><div class="in row" style="gap:10px">${prev}${next}</div></div>`;
+}
+
+/* ---------- ① 車の情報 ---------- */
+function vehicleHTML(){
+  const v = cur.vehicle;
+  const seg = (key, opts) => `<div class="seg">${opts.map(o => `<button data-act="setv" data-k="${key}" data-v="${o[0]}" class="${String(v[key]) === String(o[0]) ? "on" : ""}">${o[1]}</button>`).join("")}</div>`;
+  return `<h2>車の情報</h2><p class="sub">空欄でもOK。膜厚の判定基準を決めるのに使います。</p>
+  <label class="f">車種(メモ用)</label><input type="text" id="v-name" value="${esc(v.name)}" placeholder="例: ○○ ハイブリッド">
+  <label class="f">年式</label><input type="number" inputmode="numeric" id="v-year" value="${esc(v.year)}" placeholder="例: 2018">
+  <label class="f">国産 / 輸入</label>${seg("origin", [["domestic","国産車"],["import","輸入車"]])}
+  <label class="f">ボディカラー</label>${seg("color", [["solid","ソリッド(単色)"],["metallic","メタリック"],["pearl","パール"]])}
+  <label class="f">ドアの数</label>${seg("doors", [[4,"4ドア・5ドア"],[2,"2ドア"]])}
+  <details style="margin-top:14px"><summary>膜厚の基準を自分で決める(上級者向け)</summary>
+    <label class="f">新車の膜厚の上限(μm)</label>
+    <input type="number" inputmode="numeric" id="v-nm" value="${v.normal_max ?? ""}" placeholder="空欄で自動(${autoNormal()}μm)">
+    <small>これを超えると「再塗装の疑い」、さらに +100 / +250μm で段階が上がります。</small></details>
+  <div class="help" style="margin-top:18px">💡 迷ったらそのまま「次へ」を押してください。</div>`;
+}
+function autoNormal(){ const v = cur.vehicle; return (v.origin === "import" ? meta.defaults.import : meta.defaults.domestic) + ({metallic:10, pearl:20}[v.color] || 0); }
+
+/* ---------- ② 膜厚 ---------- */
+const MAP = {
+  bonnet:[62,28,76,78], fender_l:[34,42,20,64], fender_r:[146,42,20,64],
+  door_fl:[34,110,20,52], door_fr:[146,110,20,52], door_rl:[34,166,20,52], door_rr:[146,166,20,52],
+  quarter_l:[34,222,20,70], quarter_r:[146,222,20,70], trunk:[62,296,76,40],
+  roof_front:[66,128,68,34], roof_center:[66,165,68,34], roof_rear:[66,202,68,34],
+  pillar_a_l:[56,108,8,18], pillar_a_r:[136,108,8,18], pillar_b_l:[56,172,8,22], pillar_b_r:[136,172,8,22],
+  pillar_c_l:[56,240,8,22], pillar_c_r:[136,240,8,22], rocker_l:[26,110,5,108], rocker_r:[169,110,5,108],
+};
+function mapSVG(){
+  const rects = Object.entries(MAP).map(([id, [x, y, w, h]]) => {
+    const p = ev && ev.film.panels[id], cls = p ? (p.level < 0 ? "lm1" : "l" + p.level) : "u";
+    const val = p ? `<text x="${x + w/2}" y="${y + h/2 + 3}">${p.value}</text>` : "";
+    return `<g data-act="mapfocus" data-id="${id}"><rect id="m-${id}" class="${cls}" x="${x}" y="${y}" width="${w}" height="${h}" rx="4"/><title>${esc(meta.panels[id].name)}</title>${w >= 18 ? val : ""}</g>`;
+  }).join("");
+  return `<svg class="map" viewBox="0 0 200 346" role="img" aria-label="車を上から見た図"><text x="100" y="16" style="font-size:10px;fill:var(--sub)">▲ 前</text>${rects}</svg>
+  <div class="legend"><span><i class="u"></i>未測定</span><span><i class="l0"></i>正常</span><span><i class="l1"></i>再塗装?</span><span><i class="l2"></i>厚い</span><span><i class="l3"></i>板金?</span></div>`;
+}
+function filmHTML(){
+  const exp = new Set(ev ? ev.film.expected_ids : meta.panel_order);
+  const groups = meta.panel_groups.map(([g, gname]) => {
+    const rows = meta.panel_order.filter(id => meta.panels[id].group === g && (cur.vehicle.doors !== 2 || !meta.panels[id].rear_door)).map(id => `
+      <div class="film" id="row-${id}"><div><div class="nm">${esc(meta.panels[id].name)}</div><div class="st" id="st-${id}"></div></div>
+      <input type="number" inputmode="decimal" step="any" data-film="${id}" value="${esc(cur.film[id] ?? "")}" placeholder="μm"></div>`).join("");
+    return `<h2>${gname}</h2><div class="card" style="padding:4px 16px">${rows}</div>`;
+  }).join("");
+  setTimeout(patchFilm, 0);
+  return `<h2>膜厚を入力</h2>
+  <div class="help">膜厚計を各パネルの中央あたりに当て、<b>いちばん大きい数字</b>を入力します。測れない所は空欄でOK。アルミ・樹脂のパネルは鉄用の膜厚計では測れません。</div>
+  ${mapSVG()}<p class="sub" id="film-count" style="text-align:center"></p>${groups}`;
+}
+function patchFilm(){
+  if(!ev) { runEval(); return; }
+  for(const id of meta.panel_order){
+    const row = $("#row-" + id); if(!row) continue;
+    const p = ev.film.panels[id];
+    row.className = "film " + (p ? (p.level < 0 ? "lvm1" : "lv" + p.level) : "");
+    $("#st-" + id).textContent = p ? [p.label, ...p.notes.filter(n => !/^\d/.test(n))].join(" ・ ") : "";
+    const m = $("#m-" + id); if(m) m.setAttribute("class", p ? (p.level < 0 ? "lm1" : "l" + p.level) : "u");
+  }
+  const c = $("#film-count"); if(c) c.textContent = `測定済み ${ev.film.measured} / ${ev.film.expected} 部位 ・ 新車の目安 〜${ev.film.limits.normal}μm`;
+}
+
+/* ---------- ③ 撮影 ---------- */
+function shootHTML(){
+  if(!ev){ runEval(); return `<p class="sub" style="margin-top:30px">読み込み中…</p>`; }
+  const sg = ev.suggestions.filter(s => !s.done);
+  const doneN = meta.basic_points.filter(id => ev.points[id].done).length;
+  const card = s => {
+    const sp = meta.points[s.id], st = ev.points[s.id], t = TIER[s.tier];
+    const status = st.level ? `<span class="badge ${LV[st.level][0]}">${LV[st.level][1]}${st.source === "user" ? "(自分の判定)" : ""}</span>` : "";
+    return `<button class="card pt ${st.done ? "done" : ""}" data-act="point" data-id="${s.id}"><div class="t"><h3>${esc(sp.name)}</h3>${st.done ? status : `<span class="badge ${t[0]}">${t[1]}</span>`}</div>
+      <small>${sp.kind === "bolt" ? "ボルトを撮る" : "骨格(溶接・シーラー)を撮る"} ・ ${sp.pair ? "左右" : "1か所"}</small>
+      ${s.reasons.map(r => `<div class="why">▶ ${esc(r)}</div>`).join("")}</button>`;
+  };
+  const sect = (title, tiers, note = "") => {
+    const l = sg.filter(s => tiers.includes(s.tier)); if(!l.length) return "";
+    return `<h2>${title}</h2>${note ? `<p class="sub">${note}</p>` : ""}${l.map(card).join("")}`;
+  };
+  const done = ev.suggestions.filter(s => s.done);
+  return `<h2>ボルト・骨格を撮影</h2>
+  <div class="card"><b>基本の確認 ${doneN} / ${meta.basic_points.length}</b><div class="meter"><i style="width:${doneN / meta.basic_points.length * 100}%"></i></div>
+  <small>上から順に進めてください。怪しい所が見つかると、次に調べる場所が自動で上に出ます。</small></div>
+  ${sect("🔴 まず確認して(怪しい手がかりあり)", ["must"], "膜厚や、他の場所の結果から、特に調べたい場所です。")}
+  ${sect("🟠 できれば確認", ["high"])}
+  ${sect("基本の確認", ["basic"], "まずはここから。1か所あたり2〜3分です。")}
+  ${done.length ? `<h2>確認ずみ</h2>${done.map(card).join("")}` : ""}
+  ${sg.some(s => s.tier === "optional") ? `<details><summary>ほかにも調べられる場所(任意)</summary>${sg.filter(s => s.tier === "optional").map(card).join("")}</details>` : ""}`;
+}
+
+/* ---------- 撮影ポイント ---------- */
+const key = (pid, slot) => `${cur.id}:${pid}:${slot}`;
+function pointHTML(id){
+  const sp = meta.points[id]; const st = cur.points[id] || (cur.points[id] = {}); st.thumbs = st.thumbs || {};
+  const slots = sp.slots.map(s => {
+    const th = st.thumbs[s.id], full = PHOTOS[key(id, s.id)];
+    return `<div class="card"><div class="slot-h">${esc(sp.pair && s.id !== "close" ? "📷 " + s.label + "(車に乗って前を向いた時の" + s.label.replace("側","") + ")" : "📷 " + s.label)}${s.required ? "<b>必須</b>" : ""}</div>
+      <label class="cam ${th ? "has" : ""}">${th ? `<img src="${th}" alt="">` : `<span class="cam-i">📷</span><span>タップして撮影</span>`}
+      <input type="file" accept="image/*" capture="environment" data-slot="${s.id}"></label>
+      ${th && !full ? `<div class="warn">保存済みの写真です。AIで調べ直すには撮り直してください。</div>` : ""}
+      ${st.warn && st.warn[s.id] ? `<div class="warn">⚠ ${esc(st.warn[s.id])}</div>` : ""}
+      <label class="alt">アルバムから選ぶ<input type="file" accept="image/*" data-slot="${s.id}"></label></div>`;
+  }).join("");
+  return `<div class="top"><button class="btn ghost" data-act="back" style="width:auto;min-height:40px;display:inline-flex">← 一覧に戻る</button></div>
+  <h2 style="margin-top:14px">${esc(sp.name)} <span class="badge">${sp.kind === "bolt" ? "ボルト" : "骨格"}</span></h2>
+  <div class="card"><b>📍 どこ?</b><p>${esc(sp.where)}</p><b>📸 撮り方</b><p>${esc(sp.tips)}</p></div>
+  ${slots}
+  <div id="analyze-box">${analyzeBoxHTML(id)}</div>
+  <div id="point-result">${resultCardHTML(id)}</div>
+  <div id="follow">${followHTML(id)}</div>`;
+}
+function analyzeBoxHTML(id){
+  const sp = meta.points[id];
+  const ready = sp.slots.filter(s => s.required).every(s => PHOTOS[key(id, s.id)]);
+  if(!meta.ai) return `<div class="help">AIが設定されていないので、写真は参考として撮り、下の「あなたの判定」を選んでください。</div>`;
+  return `<button class="btn" data-act="analyze" data-id="${id}" ${ready && !busy ? "" : "disabled"}>${busy ? '<span class="spin"></span> AIが調べています…(10〜20秒)' : "🔍 AIで調べる"}</button>
+  ${ready ? "" : `<p class="sub" style="text-align:center">必須の写真を撮ると押せます</p>`}`;
+}
+function resultCardHTML(id){
+  const st = cur.points[id] || {}, ai = st.ai, sp = meta.points[id];
+  let html = "";
+  if(ai){
+    if(!ai.image_ok){
+      html += `<div class="card" style="border-color:var(--bad)"><b>📸 この写真では判定できませんでした</b><p>${esc(ai.retake_advice || "もう少し近づき、明るい所で撮り直してください。")}</p></div>`;
+    }else{
+      const lv = LV[ai.tamper_level] || LV.unclear;
+      html += `<div class="card"><span class="badge ${lv[0]}">AIの判定: ${lv[1]}</span> <small>(自信: ${({low:"低",medium:"中",high:"高"})[ai.confidence] || "-"})</small>
+        <p>${esc(ai.summary)}</p>
+        ${ai.checks.map(c => `<div class="chk"><div class="ic ${c.result}">${({normal:"○", suspicious:"△", unclear:"？"})[c.result]}</div><div><b>${esc(c.label)}</b>${c.detail ? `<br><small>${esc(c.detail)}</small>` : ""}</div></div>`).join("")}
+        ${ai.next_hint ? `<p class="why">➕ ${esc(ai.next_hint)}</p>` : ""}</div>`;
+    }
+  }
+  const u = st.user, b = (v, cls, t) => `<button data-act="user" data-id="${id}" data-v="${v}" class="${cls} ${u === v ? "on" : ""}">${t}</button>`;
+  html += `<div class="card"><b>👀 あなたの目での判定</b><p class="sub">${ai ? "AIと違うと感じたら、あなたの判定が優先されます。" : "写真を見て、現物の様子から選んでください。"}</p>
+    <div class="seg">${b("ok","ok","問題なさそう")}${b("sus","sus","怪しい")}${b("bad","bad","かなり怪しい")}${b("unk","unk","わからない")}</div>
+    ${u ? `<p style="text-align:center;margin-top:8px"><a href="#" data-act="user" data-id="${id}" data-v="">選びなおす(AIの判定に戻す)</a></p>` : ""}</div>`;
+  return html;
+}
+function followHTML(id){
+  if(!ev) return "";
+  const st = ev.points[id], sp = meta.points[id];
+  const nextSug = ev.suggestions.filter(s => !s.done && s.id !== id);
+  let html = "";
+  if(st.level === "possible" || st.level === "likely"){
+    const f = sp.follow_ups.filter(x => !ev.points[x].done);
+    html += `<div class="card" style="border-color:var(--bad)"><b>⚠ ${esc(LV[st.level][1])}。次はここを確認してください</b>
+      ${f.map(x => `<button class="btn sec" data-act="point" data-id="${x}" style="margin-top:8px;min-height:48px;justify-content:flex-start">➡ ${esc(meta.points[x].name)}</button>`).join("") || "<p>関連する場所はすべて確認ずみです。</p>"}
+      <small>${st.level === "likely" ? "触った形跡が濃いので、反対側や奥の骨格に手が入っていないか確かめます。" : "念のため、近くの骨格まで確かめると安心です。"}</small></div>`;
+  }
+  if(st.done) html += nextSug.length ? `<button class="btn" data-act="point" data-id="${nextSug[0].id}">次へ:${esc(meta.points[nextSug[0].id].name)}</button>` : `<button class="btn" data-act="step" data-s="visual">次へ:目視チェック</button>`;
+  return html;
+}
+function patchFollow(){ if(view.name !== "point") return; const f = $("#follow"); if(f) f.innerHTML = followHTML(view.id); const r = $("#point-result"); if(r) r.innerHTML = resultCardHTML(view.id); }
+
+/* ---------- 写真の取り込み ---------- */
+function loadImg(file){
+  return new Promise((res, rej) => { const url = URL.createObjectURL(file); const im = new Image(); im.onload = () => { URL.revokeObjectURL(url); res(im); }; im.onerror = rej; im.src = url; });
+}
+function drawScaled(im, max, q){
+  const k = Math.min(1, max / Math.max(im.width, im.height)); const c = document.createElement("canvas");
+  c.width = Math.round(im.width * k); c.height = Math.round(im.height * k); c.getContext("2d").drawImage(im, 0, 0, c.width, c.height);
+  return {canvas: c, url: c.toDataURL("image/jpeg", q)};
+}
+function quality(im){   // ピンボケ・暗さ・白飛びの簡易チェック
+  const c = drawScaled(im, 320, .5).canvas, ctx = c.getContext("2d"), {width: w, height: h} = c;
+  const d = ctx.getImageData(0, 0, w, h).data, g = new Float32Array(w * h); let sum = 0;
+  for(let i = 0; i < w * h; i++){ g[i] = .299 * d[i*4] + .587 * d[i*4+1] + .114 * d[i*4+2]; sum += g[i]; }
+  const mean = sum / (w * h); let lap = 0, n = 0;
+  for(let y = 1; y < h - 1; y++) for(let x = 1; x < w - 1; x++){ const i = y * w + x, v = 4 * g[i] - g[i-1] - g[i+1] - g[i-w] - g[i+w]; lap += v * v; n++; }
+  const blur = lap / n;
+  if(mean < 45) return "暗すぎます。ライトを当てるか、明るい所で撮り直してください。";
+  if(mean > 225) return "白っぽく飛んでいます。光の反射を避けて撮り直してください。";
+  if(blur < 25) return "ピンボケ気味です。ボルトにピントを合わせて(画面をタップ)撮り直してください。";
+  return "";
+}
+async function onFile(input){
+  const id = view.id, slot = input.dataset.slot, f = input.files[0]; if(!f) return;
+  try{
+    const im = await loadImg(f), big = drawScaled(im, 1600, .85).url, th = drawScaled(im, 160, .5).url, warn = quality(im);
+    const st = cur.points[id] || (cur.points[id] = {}); st.thumbs = st.thumbs || {}; st.warn = st.warn || {};
+    PHOTOS[key(id, slot)] = big; st.thumbs[slot] = th; st.warn[slot] = warn;
+    if(warn) toast("⚠ " + warn.split("。")[0]);
+    save(); const y = window.scrollY; view = {name: "point", id}; render(); window.scrollTo(0, y);
+  }catch{ toast("写真を読み込めませんでした"); }
+}
+async function analyze(id){
+  const sp = meta.points[id];
+  const images = sp.slots.filter(s => PHOTOS[key(id, s.id)]).map(s => ({label: s.label.replace(/\(.*$/, ""), data: PHOTOS[key(id, s.id)]}));
+  busy = true; $("#analyze-box").innerHTML = analyzeBoxHTML(id);
+  try{
+    const r = await api("/api/analyze", {point_id: id, images, vehicle: cur.vehicle});
+    cur.points[id].ai = r; delete cur.points[id].user; save();
+    if(!r.image_ok) toast("写真が使えませんでした。撮り直しましょう");
+  }catch(e){ toast(e.message); }
+  busy = false;
+  if(view.name === "point" && view.id === id){ $("#analyze-box").innerHTML = analyzeBoxHTML(id); patchFollow(); }
+  scheduleEval();
+  setTimeout(() => { const r = $("#point-result"); if(r) r.scrollIntoView({behavior: "smooth", block: "start"}); }, 100);
+}
+
+/* ---------- ④ 目視 ---------- */
+function visualHTML(){
+  const qs = meta.visual_checks.map(q => {
+    const a = cur.visual[q.id], b = (v, cls, t) => `<button data-act="vis" data-id="${q.id}" data-v="${v}" class="${cls} ${a === v ? "on" : ""}">${t}</button>`;
+    return `<div class="q"><p style="margin:0 0 8px"><b>${esc(q.q)}</b></p><div class="seg">${b("ok","ok","問題なし")}${b("ng","bad","気になる")}${b("unknown","unk","未確認")}</div></div>`;
+  }).join("");
+  return `<h2>目視チェック</h2><p class="sub">車の周りを見ながら答えてください(約3分)。</p><div class="card">${qs}</div>`;
+}
+
+/* ---------- ⑤ 結果 ---------- */
+function resultHTML(){
+  if(!ev){ runEval(); return `<p class="sub" style="margin-top:30px">集計中…</p>`; }
+  const v = ev.verdict;
+  const reasons = ev.reasons.map(r => `<div class="chk"><div class="ic" style="color:var(--bad)">+${r.points}</div><div><b>${esc(r.title)}</b><br><small>${esc(r.detail)}</small></div></div>`).join("") || "<small>疑いの材料は見つかっていません。</small>";
+  const unc = ev.unconfirmed.length ? `<div class="card"><b>🔎 まだ確認していないこと</b><ul style="padding-left:20px;margin:6px 0">${ev.unconfirmed.map(u => `<li>${esc(u)}</li>`).join("")}</ul>
+    <button class="btn sec" data-act="step" data-s="shoot" style="margin-top:8px">撮影に戻る</button></div>` : "";
+  return `<div class="verdict ${v.key}"><p class="big">${esc(v.label)}</p><p>${esc(v.message)}</p>
+    ${ev.skeleton_suspect ? `<p><b>⚠ 骨格(フレーム・ピラー・ルーフなど)に影響している疑いがあります</b></p>` : ""}
+    <small>疑い度 ${ev.score}点 ・ 確認の充実度 ${Math.round(ev.coverage * 100)}%</small><div class="meter"><i style="width:${Math.round(ev.coverage * 100)}%"></i></div></div>
+  <div class="card"><b>膜厚マップ</b>${mapSVG()}</div>
+  <div class="card"><b>疑いの理由</b>${reasons}</div>
+  ${unc}
+  <div class="card"><b>📋 査定メモ</b><textarea id="memo" readonly>${esc(ev.memo)}</textarea>
+    <button class="btn" data-act="copy" style="margin-top:8px">メモをコピー</button></div>
+  <p class="sub">※AIと簡易ルールによる補助判定です。写真に写らない部分は判断できません。修復歴の有無は、必ず現物の確認で最終判断してください。</p>`;
+}
+
+/* ---------- 描画・イベント ---------- */
+function render(){
+  const a = $("#app");
+  a.innerHTML = view.name === "home" ? homeHTML() : view.name === "case" ? caseHTML() : pointHTML(view.id);
+}
+document.addEventListener("click", async e => {
+  const t = e.target.closest("[data-act]"); if(!t) return;
+  const act = t.dataset.act, d = t.dataset;
+  if(act === "user" || act === "analyze" || act === "step" || act === "point" || act === "back") e.preventDefault();
+  if(act === "start"){ cur = newCase(); ev = null; save(); go({name: "case", step: "vehicle"}); }
+  else if(act === "open"){ cur = cases.find(c => c.id === d.id); ev = null; go({name: "case", step: "shoot"}); runEval(); }
+  else if(act === "del"){ if(confirm("この診断を削除しますか?")){ cases = cases.filter(c => c.id !== d.id); save(); render(); } }
+  else if(act === "home"){ cur = null; ev = null; go({name: "home"}); }
+  else if(act === "step"){ if(view.name === "point") cur && save(); go({name: "case", step: d.s}); if(d.s === "shoot" || d.s === "result") runEval(); }
+  else if(act === "back"){ go({name: "case", step: "shoot"}); }
+  else if(act === "setv"){ cur.vehicle[d.k] = d.k === "doors" ? +d.v : d.v; save(); render(); scheduleEval(); }
+  else if(act === "point"){ if(view.name === "point") save(); go({name: "point", id: d.id}); }
+  else if(act === "analyze"){ analyze(d.id); }
+  else if(act === "user"){ const st = cur.points[d.id] || (cur.points[d.id] = {}); if(d.v) st.user = d.v; else delete st.user; save(); patchFollow(); scheduleEval(); }
+  else if(act === "vis"){ cur.visual[d.id] = d.v; save(); render(); scheduleEval(); }
+  else if(act === "mapfocus"){ const inp = $(`[data-film="${d.id}"]`); if(inp){ inp.scrollIntoView({block: "center", behavior: "smooth"}); inp.focus(); } else toast(meta.panels[d.id].name + (cur ? "" : "")); }
+  else if(act === "copy"){
+    try{ await navigator.clipboard.writeText(ev.memo); }catch{ const m = $("#memo"); m.removeAttribute("readonly"); m.select(); document.execCommand("copy"); m.setAttribute("readonly", ""); }
+    toast("コピーしました。査定票などに貼り付けられます");
+  }
+});
+document.addEventListener("input", e => {
+  const t = e.target;
+  if(t.id === "v-name") cur.vehicle.name = t.value;
+  else if(t.id === "v-year") cur.vehicle.year = t.value;
+  else if(t.id === "v-nm"){ const n = parseFloat(t.value); cur.vehicle.normal_max = isNaN(n) ? null : n; scheduleEval(); }
+  else if(t.dataset.film){ const n = parseFloat(t.value); if(isNaN(n)) delete cur.film[t.dataset.film]; else cur.film[t.dataset.film] = n; scheduleEval(); }
+  else return;
+  save();
+});
+document.addEventListener("change", e => { if(e.target.dataset.slot) onFile(e.target); });
+
+(async function init(){
+  load();
+  try{ meta = await api("/api/meta"); }
+  catch(e){ $("#app").innerHTML = `<h1>修復歴チェッカー</h1><div class="card">サーバーに接続できません。<br><small>${esc(e.message)}</small></div>`; return; }
+  render();
+})();
+</script>
+</body>
+</html>

@@ -4,3 +4,5 @@ __pycache__/
 data/
 .pytest_cache/
 .venv/
+shufuku/.env
+shufuku/.venv/
