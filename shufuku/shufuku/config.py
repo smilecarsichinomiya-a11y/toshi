@@ -34,6 +34,7 @@ class Config:
     access_code: str = ""
     film_normal_domestic: int = 150  # 新車塗装の膜厚の上限の目安(μm)
     film_normal_import: int = 200
+    hosted: bool = False  # クラウド上で動いている(PORT が指定されている)
 
 
 def load_config() -> Config:
@@ -42,8 +43,9 @@ def load_config() -> Config:
         anthropic_key=_s("ANTHROPIC_API_KEY", ""),
         model=_s("SHUFUKU_MODEL", "claude-sonnet-5-5"),
         host=_s("SHUFUKU_HOST", "0.0.0.0"),
-        port=_i("SHUFUKU_PORT", 8100),
+        port=_i("SHUFUKU_PORT", _i("PORT", 8100)),
         access_code=_s("SHUFUKU_ACCESS_CODE", ""),
         film_normal_domestic=_i("SHUFUKU_FILM_DOMESTIC", 150),
         film_normal_import=_i("SHUFUKU_FILM_IMPORT", 200),
+        hosted=bool(os.environ.get("PORT")) and not os.environ.get("SHUFUKU_PORT"),
     )

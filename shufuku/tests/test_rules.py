@@ -128,3 +128,18 @@ def test_access_code():
     c = TestClient(create_app(Config(access_code="1234"), Fake()))
     assert c.get("/api/meta").status_code == 401
     assert c.get("/api/meta", headers={"x-access-code": "1234"}).status_code == 200
+
+
+def test_access_code_rate_limit():
+    c = TestClient(create_app(Config(access_code="abcd"), Fake()))
+    for _ in range(10):
+        assert c.get("/api/meta", headers={"x-access-code": "x"}).status_code == 401
+    assert c.get("/api/meta", headers={"x-access-code": "abcd"}).status_code == 429
+
+
+def test_hosted_flag(monkeypatch):
+    from shufuku.config import load_config
+    monkeypatch.setenv("PORT", "10000")
+    monkeypatch.delenv("SHUFUKU_PORT", raising=False)
+    c = load_config()
+    assert c.hosted and c.port == 10000

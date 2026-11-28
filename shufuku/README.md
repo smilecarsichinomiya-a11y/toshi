@@ -21,3 +21,18 @@ AIは「何が見えるか」を観察するだけで、疑い度はルールで
 - 同じWi-Fi内でしか使えません。外から使う場合は、HTTPSで公開し `SHUFUKU_ACCESS_CODE` を必ず設定してください
 - 膜厚のしきい値は `.env` か、画面の「車の情報」で変えられます
 - テスト: `pip install -r requirements.txt && python -m pytest tests`
+
+## パソコン無し・スマホだけで使う(インターネットに公開する)
+
+Render(https://render.com)に置くと、スマホのモバイル回線だけで使えます。HTTPS も自動で付きます。
+
+1. Render に「Sign in with GitHub」で登録し、GitHub のこのリポジトリ(`toshi`)へのアクセスを許可する
+2. 「New +」→「Blueprint」→ リポジトリ `toshi` を選び、ブランチに `claude/tender-turing-fb1y4n` を指定する
+3. 聞かれる2つを入力して「Apply」を押す
+   - `ANTHROPIC_API_KEY` … API キー
+   - `SHUFUKU_ACCESS_CODE` … 自分で決める合言葉(**12文字以上、他人に推測されないもの**。必須)
+4. 数分待つと `https://〜.onrender.com` のアドレスができる。スマホで開き、合言葉を入力する
+
+- 無料プランは、しばらく使わないと止まり、次に開くとき1分ほど待ちます。現場に行く前に一度開いておくと安心です
+- 合言葉は、10回間違えると10分ロックされます
+- 診断データはスマホ内に保存されます(サーバーには残りません)

@@ -25,10 +25,14 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cfg = load_config()
     analyzer = make_analyzer(cfg)
+    if cfg.hosted and not cfg.access_code:
+        raise SystemExit("インターネット上で公開する場合は SHUFUKU_ACCESS_CODE(合言葉)を必ず設定してください")
     print("=" * 56)
     print(" 修復歴チェッカー を起動しました")
     print(f"  パソコンで開く : http://127.0.0.1:{cfg.port}")
-    if cfg.host != "127.0.0.1":
+    if cfg.hosted:
+        print("  クラウド上で動いています(スマホからは公開アドレスで開きます)")
+    elif cfg.host != "127.0.0.1":
         print(f"  スマホで開く   : http://{lan_ip()}:{cfg.port}  (同じWi-Fiにつないでください)")
     print(f"  AI判定         : {'使えます (' + cfg.model + ')' if analyzer else '未設定(自分の目で判定するモード)'}")
     print("  終了するには、この黒い画面を閉じます")

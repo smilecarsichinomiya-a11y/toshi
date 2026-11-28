@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import time
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -31,9 +32,22 @@ def create_app(cfg: Config, analyzer) -> FastAPI:
     """analyzer: analyze(point_id, images, vehicle) -> dict を持つもの(None なら AI なし)。"""
     app = FastAPI(title="修復歴チェッカー")
 
+    fails: dict[str, list[float]] = {}  # 合言葉の総当たり対策(IPごとの失敗時刻)
+
+    def client_id(request: Request) -> str:
+        xff = request.headers.get("x-forwarded-for", "")
+        return xff.split(",")[-1].strip() if xff else (request.client.host if request.client else "?")
+
     def auth(request: Request):
-        if cfg.access_code and not hmac.compare_digest(
-                request.headers.get("x-access-code", ""), cfg.access_code):
+        if not cfg.access_code:
+            return
+        who, now = client_id(request), time.time()
+        recent = [t for t in fails.get(who, []) if now - t < 600]
+        if len(recent) >= 10:
+            raise HTTPException(429, "間違いが続いたため、10分ほど待ってからやり直してください")
+        if not hmac.compare_digest(request.headers.get("x-access-code", ""), cfg.access_code):
+            recent.append(now)
+            fails[who] = recent
             raise HTTPException(401, "アクセスコードが違います")
 
     @app.get("/")

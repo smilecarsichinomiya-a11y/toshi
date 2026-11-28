@@ -1,0 +1,18 @@
+# Render(https://render.com)に公開するための設定。手順は shufuku/README.md を参照
+services:
+  - type: web
+    name: shufuku-checker
+    runtime: python
+    rootDir: shufuku
+    branch: claude/tender-turing-fb1y4n
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m shufuku
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SHUFUKU_ACCESS_CODE
+        sync: false
